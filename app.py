@@ -634,12 +634,16 @@ class PortfolioAnalyzer:
         
         return portfolio_performance.sort_index()
 
-    def generate_dividend_calendar(self, portfolio_holdings: List[Dict], batch_size: int = 10, delay: int = 2) -> pd.DataFrame:
-        """Generate monthly dividend calendar with rate limiting"""
-        dividend_calendar = []
+    def generate_historical_dividend_calendar(self, portfolio_holdings: List[Dict], batch_size: int = 10, delay: int = 2) -> pd.DataFrame:
+        """Generate historical dividend calendar showing actual payments from last year"""
+        dividend_history = []
         
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        # Get date range for last year
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
         
         # Process in batches for dividend calendar
         for batch_start in range(0, len(portfolio_holdings), batch_size):
@@ -651,7 +655,7 @@ class PortfolioAnalyzer:
                 shares = holding['shares']
                 overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
                 
-                status_text.text(f'Generating dividend calendar for {symbol}...')
+                status_text.text(f'Fetching dividend history for {symbol}...')
                 progress_bar.progress(overall_progress)
                 
                 try:
@@ -660,59 +664,36 @@ class PortfolioAnalyzer:
                     
                     stock = yf.Ticker(symbol)
                     
-                    # Get dividend history for the last 2 years
-                    end_date = datetime.now()
-                    start_date = end_date - timedelta(days=730)
+                    # Get dividend history for the last year
                     dividends = stock.dividends
                     
-                    # Filter recent dividends and handle timezone issues
+                    # Filter dividends from last year and handle timezone issues
                     if len(dividends) > 0:
                         # Convert timezone-aware index to timezone-naive for comparison
                         dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
                         
-                        # Filter recent dividends
-                        recent_mask = dividend_dates >= start_date
+                        # Filter dividends from the last year
+                        recent_mask = (dividend_dates >= start_date) & (dividend_dates <= end_date)
                         recent_dividends = dividends[recent_mask]
                         recent_dividend_dates = dividend_dates[recent_mask]
                         
-                        if len(recent_dividends) > 0:
-                            # Estimate dividend frequency
-                            if len(recent_dividends) >= 4:
-                                # Quarterly dividend likely
-                                frequency = 'Quarterly'
-                                last_dividend = recent_dividends.iloc[-1]
-                                last_date = recent_dividend_dates[-1]
-                                
-                                # Project next 4 quarters
-                                for quarter in range(4):
-                                    next_date = last_date + timedelta(days=90*(quarter+1))
-                                    dividend_calendar.append({
-                                        'Symbol': symbol,
-                                        'Date': next_date,
-                                        'Month': next_date.strftime('%Y-%m'),
-                                        'Dividend_Per_Share': float(last_dividend),
-                                        'Total_Dividend': float(last_dividend) * shares,
-                                        'Frequency': frequency
-                                    })
-                            
-                            elif len(recent_dividends) >= 1:
-                                # Annual dividend likely
-                                frequency = 'Annual'
-                                last_dividend = recent_dividends.iloc[-1]
-                                last_date = recent_dividend_dates[-1]
-                                
-                                next_date = last_date + timedelta(days=365)
-                                dividend_calendar.append({
-                                    'Symbol': symbol,
-                                    'Date': next_date,
-                                    'Month': next_date.strftime('%Y-%m'),
-                                    'Dividend_Per_Share': float(last_dividend),
-                                    'Total_Dividend': float(last_dividend) * shares,
-                                    'Frequency': frequency
-                                })
+                        # Add each dividend payment to history
+                        for date, dividend_amount in zip(recent_dividend_dates, recent_dividends):
+                            dividend_history.append({
+                                'Date': date.date(),
+                                'Symbol': symbol,
+                                'Company': f"{symbol}",  # We'll get company name from stock info if available
+                                'Dividend_Per_Share': float(dividend_amount),
+                                'Shares_Owned': shares,
+                                'Total_Dividend_Received': float(dividend_amount) * shares,
+                                'Month': date.strftime('%Y-%m'),
+                                'Quarter': f"Q{((date.month-1)//3)+1} {date.year}",
+                                'Day_of_Year': date.timetuple().tm_yday,
+                                'Weekday': date.strftime('%A')
+                            })
                 
                 except Exception as e:
-                    st.warning(f"Could not generate dividend calendar for {symbol}: {str(e)}")
+                    st.warning(f"Could not fetch dividend history for {symbol}: {str(e)}")
             
             # Wait between batches (except for the last batch)
             if batch_end < len(portfolio_holdings):
@@ -721,13 +702,34 @@ class PortfolioAnalyzer:
         progress_bar.empty()
         status_text.empty()
         
-        if dividend_calendar:
-            df = pd.DataFrame(dividend_calendar)
-            # Group by month for monthly distribution
-            monthly_distribution = df.groupby('Month')['Total_Dividend'].sum().reset_index()
-            return df, monthly_distribution
+        if dividend_history:
+            df = pd.DataFrame(dividend_history)
+            
+            # Sort by date
+            df = df.sort_values('Date')
+            
+            # Create daily aggregation for plotting
+            daily_dividends = df.groupby('Date').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: ', '.join(x.unique()),
+                'Dividend_Per_Share': 'sum'  # This isn't quite right but gives a sense of magnitude
+            }).reset_index()
+            daily_dividends.rename(columns={'Symbol': 'Companies'}, inplace=True)
+            
+            # Create monthly aggregation
+            monthly_dividends = df.groupby('Month').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: len(x.unique()),
+                'Dividend_Per_Share': 'count'
+            }).reset_index()
+            monthly_dividends.rename(columns={
+                'Symbol': 'Companies_Count',
+                'Dividend_Per_Share': 'Payment_Count'
+            }, inplace=True)
+            
+            return df, daily_dividends, monthly_dividends
         else:
-            return pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     def analyze_portfolio_with_ai(self, portfolio_data: pd.DataFrame, metrics: Dict) -> str:
         """Generate AI-powered portfolio analysis"""
@@ -1467,43 +1469,234 @@ def main():
         else:
             st.warning("Unable to fetch sufficient historical data for performance analysis.")
         
-        # Dividend Calendar
-        st.header("📅 Dividend Calendar")
+        # Dividend Calendar - Historical Analysis
+        st.header("📅 Historical Dividend Calendar (Last 12 Months)")
+        st.info("💰 **Actual dividend payments received** - showing real dividend income history")
         
-        dividend_calendar, monthly_distribution = analyzer.generate_dividend_calendar(
+        dividend_history, daily_dividends, monthly_dividends = analyzer.generate_historical_dividend_calendar(
             portfolio_holdings, 
             batch_size=batch_size, 
             delay=2  # Shorter delay for dividend calendar
         )
         
-        if not dividend_calendar.empty:
-            col1, col2 = st.columns(2)
+        if not dividend_history.empty:
+            # Summary metrics
+            total_dividends_received = dividend_history['Total_Dividend_Received'].sum()
+            avg_monthly_dividends = monthly_dividends['Total_Dividend_Received'].mean() if not monthly_dividends.empty else 0
+            dividend_payments_count = len(dividend_history)
+            unique_companies = dividend_history['Symbol'].nunique()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Dividends Received", f"${total_dividends_received:,.2f}")
+            with col2:
+                st.metric("Average Monthly", f"${avg_monthly_dividends:,.2f}")
+            with col3:
+                st.metric("Total Payments", dividend_payments_count)
+            with col4:
+                st.metric("Dividend-Paying Stocks", unique_companies)
+            
+            # Main visualizations
+            col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.subheader("📊 Monthly Dividend Distribution")
-                if not monthly_distribution.empty:
-                    fig_monthly = px.bar(
-                        monthly_distribution,
-                        x='Month',
-                        y='Total_Dividend',
-                        title="Expected Monthly Dividend Income",
-                        labels={'Total_Dividend': 'Dividend Amount ($)', 'Month': 'Month'}
+                st.subheader("📊 Daily Dividend Payments")
+                
+                if not daily_dividends.empty:
+                    # Create detailed daily bar chart
+                    fig_daily = go.Figure()
+                    
+                    # Add bars for daily dividends
+                    fig_daily.add_trace(go.Bar(
+                        x=daily_dividends['Date'],
+                        y=daily_dividends['Total_Dividend_Received'],
+                        text=daily_dividends['Companies'],
+                        textposition='outside',
+                        hovertemplate='<br>'.join([
+                            'Date: %{x}',
+                            'Dividend: $%{y:.2f}',
+                            'Companies: %{text}',
+                            '<extra></extra>'
+                        ]),
+                        marker_color='green',
+                        name='Daily Dividends'
+                    ))
+                    
+                    fig_daily.update_layout(
+                        title="Daily Dividend Payments - Last 12 Months",
+                        xaxis_title="Date",
+                        yaxis_title="Dividend Amount ($)",
+                        hovermode='x',
+                        height=400,
+                        showlegend=False
                     )
+                    
+                    st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # Monthly aggregation chart
+                if not monthly_dividends.empty:
+                    st.subheader("📈 Monthly Dividend Summary")
+                    
+                    fig_monthly = px.bar(
+                        monthly_dividends,
+                        x='Month',
+                        y='Total_Dividend_Received',
+                        title="Monthly Dividend Income",
+                        labels={
+                            'Total_Dividend_Received': 'Total Dividends ($)',
+                            'Month': 'Month'
+                        },
+                        text='Total_Dividend_Received'
+                    )
+                    
+                    fig_monthly.update_traces(
+                        texttemplate='$%{text:.0f}',
+                        textposition='outside'
+                    )
+                    
+                    fig_monthly.update_layout(height=300)
                     st.plotly_chart(fig_monthly, use_container_width=True)
             
             with col2:
-                st.subheader("📋 Upcoming Dividends")
-                upcoming = dividend_calendar[dividend_calendar['Date'] >= datetime.now()].head(10)
-                if not upcoming.empty:
-                    st.dataframe(
-                        upcoming[['Symbol', 'Date', 'Dividend_Per_Share', 'Total_Dividend']],
-                        column_config={
-                            "Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                            "Dividend_Per_Share": st.column_config.NumberColumn(format="$%.2f"),
-                            "Total_Dividend": st.column_config.NumberColumn(format="$%.2f")
-                        },
-                        use_container_width=True
-                    )
+                st.subheader("🏢 Dividend by Company")
+                
+                # Company dividend summary
+                company_summary = dividend_history.groupby('Symbol').agg({
+                    'Total_Dividend_Received': 'sum',
+                    'Dividend_Per_Share': 'count',  # Number of payments
+                    'Date': 'max'  # Last payment date
+                }).reset_index()
+                company_summary.rename(columns={
+                    'Dividend_Per_Share': 'Payment_Count',
+                    'Date': 'Last_Payment'
+                }, inplace=True)
+                company_summary = company_summary.sort_values('Total_Dividend_Received', ascending=False)
+                
+                # Company pie chart
+                fig_pie = px.pie(
+                    company_summary.head(10),  # Top 10 to avoid clutter
+                    values='Total_Dividend_Received',
+                    names='Symbol',
+                    title="Dividend Distribution by Company"
+                )
+                fig_pie.update_layout(height=300)
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Top dividend payers table
+                st.subheader("🏆 Top Dividend Payers")
+                top_payers = company_summary.head(10).copy()
+                top_payers['Total_Dividend_Received'] = top_payers['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+                top_payers['Last_Payment'] = top_payers['Last_Payment'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                
+                st.dataframe(
+                    top_payers[['Symbol', 'Total_Dividend_Received', 'Payment_Count', 'Last_Payment']],
+                    column_config={
+                        "Symbol": "Stock",
+                        "Total_Dividend_Received": "Total Received",
+                        "Payment_Count": "# Payments",
+                        "Last_Payment": "Last Payment"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Detailed dividend history table
+            st.subheader("📋 Complete Dividend Payment History")
+            
+            # Format the dividend history for display
+            display_history = dividend_history.copy()
+            display_history['Date'] = display_history['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
+            display_history['Dividend_Per_Share'] = display_history['Dividend_Per_Share'].apply(lambda x: f"${x:.4f}")
+            display_history['Total_Dividend_Received'] = display_history['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+            
+            # Sort by date (most recent first)
+            display_history = display_history.sort_values('Date', ascending=False)
+            
+            # Show recent payments with expandable view
+            with st.expander("📜 View All Dividend Payments", expanded=False):
+                st.dataframe(
+                    display_history[['Date', 'Symbol', 'Dividend_Per_Share', 'Shares_Owned', 'Total_Dividend_Received', 'Quarter']],
+                    column_config={
+                        "Date": "Payment Date",
+                        "Symbol": "Stock", 
+                        "Dividend_Per_Share": "Per Share",
+                        "Shares_Owned": "Shares",
+                        "Total_Dividend_Received": "Amount Received",
+                        "Quarter": "Quarter"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Show recent payments (last 10) by default
+            st.write("**🕒 Recent Dividend Payments (Last 10):**")
+            recent_payments = display_history.head(10)
+            st.dataframe(
+                recent_payments[['Date', 'Symbol', 'Dividend_Per_Share', 'Total_Dividend_Received']],
+                column_config={
+                    "Date": "Payment Date",
+                    "Symbol": "Stock",
+                    "Dividend_Per_Share": "Per Share", 
+                    "Total_Dividend_Received": "Amount Received"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Dividend frequency analysis
+            st.subheader("📊 Dividend Payment Analysis")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Payment frequency by company
+                payment_freq = dividend_history.groupby('Symbol')['Date'].count().reset_index()
+                payment_freq.rename(columns={'Date': 'Payment_Count'}, inplace=True)
+                avg_payments = payment_freq['Payment_Count'].mean()
+                
+                st.metric("Average Payments per Stock", f"{avg_payments:.1f}")
+                
+                # Most frequent payers
+                frequent_payers = payment_freq.sort_values('Payment_Count', ascending=False).head(5)
+                st.write("**Most Frequent Payers:**")
+                for _, row in frequent_payers.iterrows():
+                    st.write(f"• {row['Symbol']}: {row['Payment_Count']} payments")
+            
+            with col2:
+                # Quarterly analysis
+                quarterly_summary = dividend_history.groupby('Quarter')['Total_Dividend_Received'].sum().reset_index()
+                quarterly_summary = quarterly_summary.sort_values('Total_Dividend_Received', ascending=False)
+                
+                if not quarterly_summary.empty:
+                    best_quarter = quarterly_summary.iloc[0]
+                    st.metric("Best Quarter", best_quarter['Quarter'], f"${best_quarter['Total_Dividend_Received']:.2f}")
+                    
+                    st.write("**Quarterly Performance:**")
+                    for _, row in quarterly_summary.iterrows():
+                        st.write(f"• {row['Quarter']}: ${row['Total_Dividend_Received']:.2f}")
+            
+            with col3:
+                # Seasonality analysis
+                dividend_history['Month_Num'] = pd.to_datetime(dividend_history['Date']).dt.month
+                monthly_counts = dividend_history.groupby('Month_Num')['Total_Dividend_Received'].agg(['sum', 'count']).reset_index()
+                monthly_counts['Month_Name'] = monthly_counts['Month_Num'].apply(lambda x: calendar.month_abbr[x])
+                
+                if not monthly_counts.empty:
+                    best_month = monthly_counts.loc[monthly_counts['sum'].idxmax()]
+                    st.metric("Best Month", best_month['Month_Name'], f"${best_month['sum']:.2f}")
+                    
+                    st.write("**Top Months:**")
+                    top_months = monthly_counts.sort_values('sum', ascending=False).head(3)
+                    for _, row in top_months.iterrows():
+                        st.write(f"• {row['Month_Name']}: ${row['sum']:.2f}")
+        
+        else:
+            st.warning("No dividend payments found in the last 12 months for this portfolio.")
+            st.info("💡 This could mean:")
+            st.write("• Your stocks don't pay dividends (growth stocks)")
+            st.write("• Dividend payments are outside the 12-month window")
+            st.write("• Data fetching issues with some stocks")
+            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)"))
         
         # AI-Powered Analysis
         if include_ai_analysis:
