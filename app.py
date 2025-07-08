@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 import calendar
 import json
 import io
+import time
+import random
 from typing import Dict, List, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
@@ -207,61 +209,79 @@ class PortfolioAnalyzer:
         st.session_state.portfolio_name = "My Portfolio"
         st.session_state.portfolio_notes = ""
 
-    def fetch_stock_info(self, symbol: str) -> Dict:
-        """Fetch comprehensive stock information"""
-        try:
-            stock = yf.Ticker(symbol)
-            info = stock.info
-            
-            # Handle dividend yield properly - yfinance returns it as decimal (0.0152 for 1.52%)
-            dividend_yield_raw = info.get('dividendYield', 0)
-            if dividend_yield_raw:
-                # If the value is already > 1, it might be in percentage form, don't multiply
-                dividend_yield = dividend_yield_raw * 100 if dividend_yield_raw < 1 else dividend_yield_raw
-            else:
-                dividend_yield = 0
-            
-            # Handle payout ratio similarly
-            payout_ratio_raw = info.get('payoutRatio', 0)
-            if payout_ratio_raw:
-                payout_ratio = payout_ratio_raw * 100 if payout_ratio_raw < 1 else payout_ratio_raw
-            else:
-                payout_ratio = 0
-            
-            return {
-                'symbol': symbol,
-                'name': info.get('longName', symbol),
-                'sector': info.get('sector', self.sector_mapping.get(symbol, 'Unknown')),
-                'industry': info.get('industry', 'Unknown'),
-                'current_price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
-                'dividend_yield': dividend_yield,
-                'dividend_rate': info.get('dividendRate', 0),
-                'payout_ratio': payout_ratio,
-                'pe_ratio': info.get('forwardPE', info.get('trailingPE', 0)),
-                'market_cap': info.get('marketCap', 0),
-                'beta': info.get('beta', 1),
-                'ex_dividend_date': info.get('exDividendDate'),
-                'dividend_date': info.get('dividendDate'),
-                'country': info.get('country', 'Unknown')
-            }
-        except Exception as e:
-            st.error(f"Error fetching data for {symbol}: {str(e)}")
-            return {
-                'symbol': symbol,
-                'name': symbol,
-                'sector': 'Unknown',
-                'industry': 'Unknown',
-                'current_price': 0,
-                'dividend_yield': 0,
-                'dividend_rate': 0,
-                'payout_ratio': 0,
-                'pe_ratio': 0,
-                'market_cap': 0,
-                'beta': 1,
-                'ex_dividend_date': None,
-                'dividend_date': None,
-                'country': 'Unknown'
-            }
+    def fetch_stock_info(self, symbol: str, retry_count: int = 3) -> Dict:
+        """Fetch comprehensive stock information with rate limiting and retry logic"""
+        
+        # Add random delay to avoid hitting rate limits
+        delay = random.uniform(0.5, 1.5)  # Random delay between 0.5-1.5 seconds
+        time.sleep(delay)
+        
+        for attempt in range(retry_count):
+            try:
+                stock = yf.Ticker(symbol)
+                info = stock.info
+                
+                # Handle dividend yield properly - yfinance returns it as decimal (0.0152 for 1.52%)
+                dividend_yield_raw = info.get('dividendYield', 0)
+                if dividend_yield_raw:
+                    # If the value is already > 1, it might be in percentage form, don't multiply
+                    dividend_yield = dividend_yield_raw * 100 if dividend_yield_raw < 1 else dividend_yield_raw
+                else:
+                    dividend_yield = 0
+                
+                # Handle payout ratio similarly
+                payout_ratio_raw = info.get('payoutRatio', 0)
+                if payout_ratio_raw:
+                    payout_ratio = payout_ratio_raw * 100 if payout_ratio_raw < 1 else payout_ratio_raw
+                else:
+                    payout_ratio = 0
+                
+                return {
+                    'symbol': symbol,
+                    'name': info.get('longName', symbol),
+                    'sector': info.get('sector', self.sector_mapping.get(symbol, 'Unknown')),
+                    'industry': info.get('industry', 'Unknown'),
+                    'current_price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
+                    'dividend_yield': dividend_yield,
+                    'dividend_rate': info.get('dividendRate', 0),
+                    'payout_ratio': payout_ratio,
+                    'pe_ratio': info.get('forwardPE', info.get('trailingPE', 0)),
+                    'market_cap': info.get('marketCap', 0),
+                    'beta': info.get('beta', 1),
+                    'ex_dividend_date': info.get('exDividendDate'),
+                    'dividend_date': info.get('dividendDate'),
+                    'country': info.get('country', 'Unknown')
+                }
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "rate limit" in error_msg or "too many requests" in error_msg:
+                    # Exponential backoff for rate limiting
+                    wait_time = (2 ** attempt) + random.uniform(1, 3)
+                    st.warning(f"Rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.error(f"Error fetching data for {symbol}: {str(e)}")
+                    break
+        
+        # Return default values if all retries failed
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector': 'Unknown',
+            'industry': 'Unknown',
+            'current_price': 0,
+            'dividend_yield': 0,
+            'dividend_rate': 0,
+            'payout_ratio': 0,
+            'pe_ratio': 0,
+            'market_cap': 0,
+            'beta': 1,
+            'ex_dividend_date': None,
+            'dividend_date': None,
+            'country': 'Unknown'
+        }
 
     def fetch_historical_data(self, symbol: str, period: str = "5y") -> pd.DataFrame:
         """Fetch historical price data"""
@@ -323,7 +343,7 @@ class PortfolioAnalyzer:
         
         return metrics
 
-    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 5) -> pd.DataFrame:
+    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 5, batch_size: int = 10, delay: int = 5) -> pd.DataFrame:
         """Simulate historical portfolio performance with total return (price + dividends)"""
         
         end_date = datetime.now()
@@ -335,59 +355,79 @@ class PortfolioAnalyzer:
         
         progress_bar = st.progress(0)
         status_text = st.empty()
+        batch_info = st.empty()
         
-        for i, holding in enumerate(portfolio_holdings):
-            symbol = holding['symbol']
-            shares = holding['shares']
+        # Process in batches
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(portfolio_holdings) + batch_size - 1) // batch_size
             
-            status_text.text(f'Fetching {years}-year historical data for {symbol}...')
-            progress_bar.progress((i + 1) / len(portfolio_holdings))
+            batch_info.info(f"📈 Fetching historical data - Batch {batch_num}/{total_batches}")
             
-            try:
-                stock = yf.Ticker(symbol)
-                hist = stock.history(start=start_date, end=end_date)
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                shares = holding['shares']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
                 
-                if not hist.empty:
-                    # Calculate position value over time
-                    hist['Position_Value'] = hist['Close'] * shares
+                status_text.text(f'Fetching {years}-year historical data for {symbol}...')
+                progress_bar.progress(overall_progress)
+                
+                try:
+                    # Add delay to avoid rate limiting
+                    time.sleep(random.uniform(0.5, 1.0))
                     
-                    # Get dividend data and add to historical data
-                    dividends = stock.dividends
-                    hist['Dividend_Income'] = 0
+                    stock = yf.Ticker(symbol)
+                    hist = stock.history(start=start_date, end=end_date)
                     
-                    # Add dividends received on each date
-                    for date, div in dividends.items():
-                        # Handle timezone issues
-                        if date.tz is not None:
-                            date = date.tz_localize(None)
+                    if not hist.empty:
+                        # Calculate position value over time
+                        hist['Position_Value'] = hist['Close'] * shares
                         
-                        if date in hist.index:
-                            hist.loc[date, 'Dividend_Income'] = div * shares
-                    
-                    # Calculate cumulative dividends (total dividends received up to each date)
-                    hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
-                    
-                    # Calculate total return percentage (capital gains + dividends)
-                    initial_price = hist['Close'].iloc[0]
-                    initial_investment = initial_price * shares
-                    
-                    # Total value = current position value + all dividends received
-                    hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
-                    
-                    # Total return percentage = (total value / initial investment - 1) * 100
-                    hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
-                    
-                    # Price-only return (for comparison)
-                    hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
-                    
-                    all_data[symbol] = hist
-                    total_initial_value += initial_investment
-                    
-            except Exception as e:
-                st.warning(f"Could not fetch historical data for {symbol}: {str(e)}")
+                        # Get dividend data and add to historical data
+                        dividends = stock.dividends
+                        hist['Dividend_Income'] = 0
+                        
+                        # Add dividends received on each date
+                        for date, div in dividends.items():
+                            # Handle timezone issues
+                            if date.tz is not None:
+                                date = date.tz_localize(None)
+                            
+                            if date in hist.index:
+                                hist.loc[date, 'Dividend_Income'] = div * shares
+                        
+                        # Calculate cumulative dividends (total dividends received up to each date)
+                        hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
+                        
+                        # Calculate total return percentage (capital gains + dividends)
+                        initial_price = hist['Close'].iloc[0]
+                        initial_investment = initial_price * shares
+                        
+                        # Total value = current position value + all dividends received
+                        hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
+                        
+                        # Total return percentage = (total value / initial investment - 1) * 100
+                        hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
+                        
+                        # Price-only return (for comparison)
+                        hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
+                        
+                        all_data[symbol] = hist
+                        total_initial_value += initial_investment
+                        
+                except Exception as e:
+                    st.warning(f"Could not fetch historical data for {symbol}: {str(e)}")
+            
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                status_text.text(f'Waiting {delay}s before next batch...')
+                time.sleep(delay)
         
         progress_bar.empty()
         status_text.empty()
+        batch_info.empty()
         
         if not all_data:
             return pd.DataFrame()
@@ -433,43 +473,74 @@ class PortfolioAnalyzer:
         
         return portfolio_performance.sort_index()
 
-    def generate_dividend_calendar(self, portfolio_holdings: List[Dict]) -> pd.DataFrame:
-        """Generate monthly dividend calendar"""
+    def generate_dividend_calendar(self, portfolio_holdings: List[Dict], batch_size: int = 10, delay: int = 2) -> pd.DataFrame:
+        """Generate monthly dividend calendar with rate limiting"""
         dividend_calendar = []
         
-        for holding in portfolio_holdings:
-            symbol = holding['symbol']
-            shares = holding['shares']
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Process in batches for dividend calendar
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
             
-            try:
-                stock = yf.Ticker(symbol)
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                shares = holding['shares']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
                 
-                # Get dividend history for the last 2 years
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=730)
-                dividends = stock.dividends
+                status_text.text(f'Generating dividend calendar for {symbol}...')
+                progress_bar.progress(overall_progress)
                 
-                # Filter recent dividends and handle timezone issues
-                if len(dividends) > 0:
-                    # Convert timezone-aware index to timezone-naive for comparison
-                    dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                try:
+                    # Add delay to avoid rate limiting
+                    time.sleep(random.uniform(0.3, 0.8))
                     
-                    # Filter recent dividends
-                    recent_mask = dividend_dates >= start_date
-                    recent_dividends = dividends[recent_mask]
-                    recent_dividend_dates = dividend_dates[recent_mask]
+                    stock = yf.Ticker(symbol)
                     
-                    if len(recent_dividends) > 0:
-                        # Estimate dividend frequency
-                        if len(recent_dividends) >= 4:
-                            # Quarterly dividend likely
-                            frequency = 'Quarterly'
-                            last_dividend = recent_dividends.iloc[-1]
-                            last_date = recent_dividend_dates[-1]
+                    # Get dividend history for the last 2 years
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=730)
+                    dividends = stock.dividends
+                    
+                    # Filter recent dividends and handle timezone issues
+                    if len(dividends) > 0:
+                        # Convert timezone-aware index to timezone-naive for comparison
+                        dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                        
+                        # Filter recent dividends
+                        recent_mask = dividend_dates >= start_date
+                        recent_dividends = dividends[recent_mask]
+                        recent_dividend_dates = dividend_dates[recent_mask]
+                        
+                        if len(recent_dividends) > 0:
+                            # Estimate dividend frequency
+                            if len(recent_dividends) >= 4:
+                                # Quarterly dividend likely
+                                frequency = 'Quarterly'
+                                last_dividend = recent_dividends.iloc[-1]
+                                last_date = recent_dividend_dates[-1]
+                                
+                                # Project next 4 quarters
+                                for quarter in range(4):
+                                    next_date = last_date + timedelta(days=90*(quarter+1))
+                                    dividend_calendar.append({
+                                        'Symbol': symbol,
+                                        'Date': next_date,
+                                        'Month': next_date.strftime('%Y-%m'),
+                                        'Dividend_Per_Share': float(last_dividend),
+                                        'Total_Dividend': float(last_dividend) * shares,
+                                        'Frequency': frequency
+                                    })
                             
-                            # Project next 4 quarters
-                            for quarter in range(4):
-                                next_date = last_date + timedelta(days=90*(quarter+1))
+                            elif len(recent_dividends) >= 1:
+                                # Annual dividend likely
+                                frequency = 'Annual'
+                                last_dividend = recent_dividends.iloc[-1]
+                                last_date = recent_dividend_dates[-1]
+                                
+                                next_date = last_date + timedelta(days=365)
                                 dividend_calendar.append({
                                     'Symbol': symbol,
                                     'Date': next_date,
@@ -478,25 +549,16 @@ class PortfolioAnalyzer:
                                     'Total_Dividend': float(last_dividend) * shares,
                                     'Frequency': frequency
                                 })
-                        
-                        elif len(recent_dividends) >= 1:
-                            # Annual dividend likely
-                            frequency = 'Annual'
-                            last_dividend = recent_dividends.iloc[-1]
-                            last_date = recent_dividend_dates[-1]
-                            
-                            next_date = last_date + timedelta(days=365)
-                            dividend_calendar.append({
-                                'Symbol': symbol,
-                                'Date': next_date,
-                                'Month': next_date.strftime('%Y-%m'),
-                                'Dividend_Per_Share': float(last_dividend),
-                                'Total_Dividend': float(last_dividend) * shares,
-                                'Frequency': frequency
-                            })
+                
+                except Exception as e:
+                    st.warning(f"Could not generate dividend calendar for {symbol}: {str(e)}")
             
-            except Exception as e:
-                st.warning(f"Could not generate dividend calendar for {symbol}: {str(e)}")
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                time.sleep(delay)
+        
+        progress_bar.empty()
+        status_text.empty()
         
         if dividend_calendar:
             df = pd.DataFrame(dividend_calendar)
@@ -870,32 +932,109 @@ def main():
         help="Longer periods provide better trend analysis but take more time to load"
     )
     
+    # Rate limiting options
+    st.sidebar.subheader("⏱️ Rate Limiting")
+    batch_size = st.sidebar.select_slider(
+        "Batch Size",
+        options=[5, 10, 15, 20, 25],
+        value=10,
+        help="Process stocks in smaller batches to avoid rate limits"
+    )
+    
+    delay_between_batches = st.sidebar.select_slider(
+        "Delay Between Batches (seconds)",
+        options=[2, 5, 10, 15, 20],
+        value=5,
+        help="Wait time between batches to respect API limits"
+    )
+    
     include_ai_analysis = st.sidebar.checkbox(
         "Include AI Analysis", 
         value=True,
         help="Requires OpenAI API key in secrets"
     )
     
+    # Cache options
+    st.sidebar.subheader("💾 Cache Options")
+    use_cache = st.sidebar.checkbox(
+        "Use Session Cache",
+        value=True,
+        help="Cache stock data to avoid repeated API calls"
+    )
+    
+    if st.sidebar.button("🗑️ Clear Cache"):
+        if 'stock_data_cache' in st.session_state:
+            st.session_state.stock_data_cache = {}
+            st.sidebar.success("Cache cleared!")
+    
     # Main analysis
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
         
-        st.info(f"Analyzing portfolio with {len(portfolio_holdings)} holdings...")
+        # Initialize cache if using it
+        if use_cache and 'stock_data_cache' not in st.session_state:
+            st.session_state.stock_data_cache = {}
         
-        # Fetch current data for all holdings
+        st.info(f"Analyzing portfolio with {len(portfolio_holdings)} holdings using batch processing...")
+        
+        # Show rate limiting info
+        estimated_time = (len(portfolio_holdings) / batch_size) * delay_between_batches
+        st.info(f"⏱️ Processing in batches of {batch_size} with {delay_between_batches}s delays. Estimated time: {estimated_time:.0f}s")
+        
+        # Fetch current data for all holdings with batch processing
         portfolio_data = []
         progress_bar = st.progress(0)
         status_text = st.empty()
+        batch_info = st.empty()
         
-        for i, holding in enumerate(portfolio_holdings):
-            status_text.text(f'Fetching data for {holding["symbol"]}...')
-            progress_bar.progress((i + 1) / len(portfolio_holdings))
+        # Process in batches to avoid rate limiting
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(portfolio_holdings) + batch_size - 1) // batch_size
             
-            stock_info = analyzer.fetch_stock_info(holding['symbol'])
-            stock_info['shares'] = holding['shares']
-            portfolio_data.append(stock_info)
+            batch_info.info(f"📦 Processing batch {batch_num}/{total_batches} ({len(current_batch)} stocks)")
+            
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
+                
+                status_text.text(f'Fetching data for {symbol}... ({batch_start + i + 1}/{len(portfolio_holdings)})')
+                progress_bar.progress(overall_progress)
+                
+                # Check cache first
+                if use_cache and symbol in st.session_state.stock_data_cache:
+                    # Check if cached data is recent (less than 1 hour old)
+                    cached_data = st.session_state.stock_data_cache[symbol]
+                    if 'cache_time' in cached_data:
+                        cache_time = datetime.fromisoformat(cached_data['cache_time'])
+                        if datetime.now() - cache_time < timedelta(hours=1):
+                            stock_info = cached_data.copy()
+                            stock_info.pop('cache_time', None)  # Remove cache timestamp
+                            stock_info['shares'] = holding['shares']
+                            portfolio_data.append(stock_info)
+                            status_text.text(f'Using cached data for {symbol}... ({batch_start + i + 1}/{len(portfolio_holdings)})')
+                            continue
+                
+                # Fetch new data
+                stock_info = analyzer.fetch_stock_info(symbol)
+                stock_info['shares'] = holding['shares']
+                portfolio_data.append(stock_info)
+                
+                # Cache the data if using cache
+                if use_cache and stock_info['current_price'] > 0:  # Only cache successful fetches
+                    cache_data = stock_info.copy()
+                    cache_data['cache_time'] = datetime.now().isoformat()
+                    st.session_state.stock_data_cache[symbol] = cache_data
+            
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                status_text.text(f'Waiting {delay_between_batches}s before next batch...')
+                time.sleep(delay_between_batches)
         
         progress_bar.empty()
         status_text.empty()
+        batch_info.empty()
         
         portfolio_df = pd.DataFrame(portfolio_data)
         
@@ -1014,7 +1153,12 @@ def main():
         
         with st.spinner("Calculating historical performance..."):
             years = int(analysis_period[0]) if analysis_period[0].isdigit() else int(analysis_period[:2])
-            historical_performance = analyzer.simulate_historical_performance(portfolio_holdings, years)
+            historical_performance = analyzer.simulate_historical_performance(
+                portfolio_holdings, 
+                years, 
+                batch_size=batch_size, 
+                delay=delay_between_batches
+            )
         
         if not historical_performance.empty:
             # Performance chart with both total return and price-only return
@@ -1133,7 +1277,11 @@ def main():
         # Dividend Calendar
         st.header("📅 Dividend Calendar")
         
-        dividend_calendar, monthly_distribution = analyzer.generate_dividend_calendar(portfolio_holdings)
+        dividend_calendar, monthly_distribution = analyzer.generate_dividend_calendar(
+            portfolio_holdings, 
+            batch_size=batch_size, 
+            delay=2  # Shorter delay for dividend calendar
+        )
         
         if not dividend_calendar.empty:
             col1, col2 = st.columns(2)
