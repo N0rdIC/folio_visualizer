@@ -202,15 +202,157 @@ class PortfolioAnalyzer:
         except Exception as e:
             raise ValueError(f"Error importing CSV: {str(e)}")
 
-    def clear_session_data(self):
-        """Clear all session data"""
-        st.session_state.portfolio_holdings = []
-        st.session_state.last_analysis_date = None
-        st.session_state.portfolio_name = "My Portfolio"
-        st.session_state.portfolio_notes = ""
+    def fetch_stock_info_fallback(self, symbol: str) -> Dict:
+        """Fallback method using alternative data sources when Yahoo Finance is blocked"""
+        
+        # Try Alpha Vantage if API key is available
+        if hasattr(st.secrets, "ALPHA_VANTAGE_API_KEY") and st.secrets.ALPHA_VANTAGE_API_KEY != "demo":
+            try:
+                av_data = self.fetch_alpha_vantage_data(symbol)
+                if av_data and av_data['current_price'] > 0:
+                    return av_data
+            except Exception as e:
+                st.warning(f"Alpha Vantage fallback failed for {symbol}: {str(e)}")
+        
+        # Try Financial Modeling Prep if API key is available  
+        if hasattr(st.secrets, "FMP_API_KEY") and st.secrets.FMP_API_KEY != "demo":
+            try:
+                fmp_data = self.fetch_fmp_data(symbol)
+                if fmp_data and fmp_data['current_price'] > 0:
+                    return fmp_data
+            except Exception as e:
+                st.warning(f"FMP fallback failed for {symbol}: {str(e)}")
+        
+        # Manual data entry fallback
+        return self.manual_data_entry_fallback(symbol)
 
-    def fetch_stock_info(self, symbol: str, retry_count: int = 3) -> Dict:
-        """Fetch comprehensive stock information with rate limiting and retry logic"""
+    def fetch_alpha_vantage_data(self, symbol: str) -> Dict:
+        """Fetch data from Alpha Vantage API"""
+        api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://www.alphavantage.co/query"
+            quote_params = {
+                'function': 'GLOBAL_QUOTE',
+                'symbol': symbol,
+                'apikey': api_key
+            }
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if 'Global Quote' in data:
+                quote = data['Global Quote']
+                current_price = float(quote.get('05. price', 0))
+                
+                # Get basic company overview
+                overview_params = {
+                    'function': 'OVERVIEW',
+                    'symbol': symbol,
+                    'apikey': api_key
+                }
+                
+                overview_response = requests.get(quote_url, params=overview_params, timeout=10)
+                overview_data = overview_response.json()
+                
+                return {
+                    'symbol': symbol,
+                    'name': overview_data.get('Name', symbol),
+                    'sector': overview_data.get('Sector', 'Unknown'),
+                    'industry': overview_data.get('Industry', 'Unknown'),
+                    'current_price': current_price,
+                    'dividend_yield': float(overview_data.get('DividendYield', 0)) * 100 if overview_data.get('DividendYield') else 0,
+                    'dividend_rate': float(overview_data.get('DividendPerShare', 0)),
+                    'payout_ratio': 0,  # Not available in Alpha Vantage
+                    'pe_ratio': float(overview_data.get('PERatio', 0)),
+                    'market_cap': int(overview_data.get('MarketCapitalization', 0)),
+                    'beta': float(overview_data.get('Beta', 1)),
+                    'ex_dividend_date': overview_data.get('ExDividendDate'),
+                    'dividend_date': None,
+                    'country': overview_data.get('Country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"Alpha Vantage error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def fetch_fmp_data(self, symbol: str) -> Dict:
+        """Fetch data from Financial Modeling Prep API"""
+        api_key = st.secrets.get("FMP_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
+            quote_params = {'apikey': api_key}
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if data and len(data) > 0:
+                quote = data[0]
+                
+                # Get profile data
+                profile_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}"
+                profile_response = requests.get(profile_url, params=quote_params, timeout=10)
+                profile_data = profile_response.json()
+                
+                profile = profile_data[0] if profile_data else {}
+                
+                return {
+                    'symbol': symbol,
+                    'name': profile.get('companyName', symbol),
+                    'sector': profile.get('sector', 'Unknown'),
+                    'industry': profile.get('industry', 'Unknown'),
+                    'current_price': quote.get('price', 0),
+                    'dividend_yield': (quote.get('price', 1) / profile.get('lastDiv', 0) * 100) if profile.get('lastDiv') else 0,
+                    'dividend_rate': profile.get('lastDiv', 0),
+                    'payout_ratio': 0,  # Would need additional API call
+                    'pe_ratio': quote.get('pe', 0),
+                    'market_cap': profile.get('mktCap', 0),
+                    'beta': profile.get('beta', 1),
+                    'ex_dividend_date': None,
+                    'dividend_date': None,
+                    'country': profile.get('country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"FMP error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def manual_data_entry_fallback(self, symbol: str) -> Dict:
+        """Allow manual data entry when APIs fail"""
+        st.warning(f"⚠️ All APIs failed for {symbol}. Using fallback values.")
+        
+        # Return basic structure with default values
+        # In a real implementation, you could show a form for manual entry
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector': self.sector_mapping.get(symbol, 'Unknown'),
+            'industry': 'Unknown',
+            'current_price': 0,  # User would need to enter manually
+            'dividend_yield': 0,
+            'dividend_rate': 0,
+            'payout_ratio': 0,
+            'pe_ratio': 0,
+            'market_cap': 0,
+            'beta': 1,
+            'ex_dividend_date': None,
+            'dividend_date': None,
+            'country': 'Unknown'
+        }
+
+    def fetch_stock_info(self, symbol: str, retry_count: int = 3, use_fallback: bool = True) -> Dict:
+        """Fetch comprehensive stock information with rate limiting and fallback options"""
         
         # Add random delay to avoid hitting rate limits
         delay = random.uniform(0.5, 1.5)  # Random delay between 0.5-1.5 seconds
@@ -220,6 +362,10 @@ class PortfolioAnalyzer:
             try:
                 stock = yf.Ticker(symbol)
                 info = stock.info
+                
+                # Check if we got valid data
+                if not info or len(info) < 5:
+                    raise Exception("Empty or minimal data returned")
                 
                 # Handle dividend yield properly - yfinance returns it as decimal (0.0152 for 1.52%)
                 dividend_yield_raw = info.get('dividendYield', 0)
@@ -255,21 +401,29 @@ class PortfolioAnalyzer:
                 
             except Exception as e:
                 error_msg = str(e).lower()
-                if "rate limit" in error_msg or "too many requests" in error_msg:
+                if "rate limit" in error_msg or "too many requests" in error_msg or "403" in error_msg or "blocked" in error_msg:
                     # Exponential backoff for rate limiting
                     wait_time = (2 ** attempt) + random.uniform(1, 3)
-                    st.warning(f"Rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
+                    st.warning(f"⚠️ Yahoo Finance rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    st.error(f"Error fetching data for {symbol}: {str(e)}")
+                    st.warning(f"Yahoo Finance error for {symbol}: {str(e)}")
                     break
         
-        # Return default values if all retries failed
+        # If all Yahoo Finance attempts failed, try fallback sources
+        if use_fallback:
+            st.info(f"🔄 Trying alternative data sources for {symbol}...")
+            fallback_data = self.fetch_stock_info_fallback(symbol)
+            if fallback_data and fallback_data['current_price'] > 0:
+                return fallback_data
+        
+        # Return default values if all attempts failed
+        st.error(f"❌ All data sources failed for {symbol}. Using default values.")
         return {
             'symbol': symbol,
             'name': symbol,
-            'sector': 'Unknown',
+            'sector': self.sector_mapping.get(symbol, 'Unknown'),
             'industry': 'Unknown',
             'current_price': 0,
             'dividend_yield': 0,
@@ -282,6 +436,13 @@ class PortfolioAnalyzer:
             'dividend_date': None,
             'country': 'Unknown'
         }
+
+    def clear_session_data(self):
+        """Clear all session data"""
+        st.session_state.portfolio_holdings = []
+        st.session_state.last_analysis_date = None
+        st.session_state.portfolio_name = "My Portfolio"
+        st.session_state.portfolio_notes = ""
 
     def fetch_historical_data(self, symbol: str, period: str = "5y") -> pd.DataFrame:
         """Fetch historical price data"""
@@ -967,6 +1128,38 @@ def main():
             st.session_state.stock_data_cache = {}
             st.sidebar.success("Cache cleared!")
     
+    # Data source options
+    st.sidebar.subheader("🔄 Data Sources")
+    use_fallback_apis = st.sidebar.checkbox(
+        "Enable Fallback APIs",
+        value=True,
+        help="Use Alpha Vantage/FMP when Yahoo Finance fails"
+    )
+    
+    # API status indicators
+    yf_status = "🟢 Available"
+    av_status = "🔴 No API Key" if not st.secrets.get("ALPHA_VANTAGE_API_KEY") else "🟢 Available"
+    fmp_status = "🔴 No API Key" if not st.secrets.get("FMP_API_KEY") else "🟢 Available"
+    
+    st.sidebar.write(f"**Yahoo Finance:** {yf_status}")
+    st.sidebar.write(f"**Alpha Vantage:** {av_status}")
+    st.sidebar.write(f"**FMP:** {fmp_status}")
+    
+    # Ban recovery helper
+    st.sidebar.subheader("🚨 Rate Limit Recovery")
+    if st.sidebar.button("🧪 Test Connection"):
+        test_symbol = "AAPL"
+        try:
+            test_data = analyzer.fetch_stock_info(test_symbol, retry_count=1, use_fallback=False)
+            if test_data['current_price'] > 0:
+                st.sidebar.success("✅ Yahoo Finance working!")
+            else:
+                st.sidebar.error("❌ Still rate limited")
+        except:
+            st.sidebar.error("❌ Still rate limited")
+    
+    st.sidebar.info("💡 If rate limited, wait 2-6 hours or enable fallback APIs")
+    
     # Main analysis
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
         
@@ -1017,7 +1210,7 @@ def main():
                             continue
                 
                 # Fetch new data
-                stock_info = analyzer.fetch_stock_info(symbol)
+                stock_info = analyzer.fetch_stock_info(symbol, use_fallback=use_fallback_apis)
                 stock_info['shares'] = holding['shares']
                 portfolio_data.append(stock_info)
                 
