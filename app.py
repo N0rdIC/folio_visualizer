@@ -88,6 +88,25 @@ class PortfolioAnalyzer:
         if 'optimization_mode' not in st.session_state:
             st.session_state.optimization_mode = False
 
+    def save_portfolio_to_session(self, holdings: List[Dict], name: str = None, notes: str = ""):
+        """Save portfolio to session state"""
+        st.session_state.portfolio_holdings = holdings.copy()
+        st.session_state.last_analysis_date = datetime.now().isoformat()
+        if name:
+            st.session_state.portfolio_name = name
+        st.session_state.portfolio_notes = notes
+
+    def load_portfolio_from_session(self) -> List[Dict]:
+        """Load portfolio from session state"""
+        return st.session_state.portfolio_holdings.copy()
+
+    def clear_session_data(self):
+        """Clear all session data"""
+        st.session_state.portfolio_holdings = []
+        st.session_state.last_analysis_date = None
+        st.session_state.portfolio_name = "My Portfolio"
+        st.session_state.portfolio_notes = ""
+
     def calculate_synthesis_metrics(self, portfolio_data: pd.DataFrame, metrics: Dict, historical_performance: pd.DataFrame = None) -> Dict:
         """Calculate synthesis metrics for portfolio optimization"""
         synthesis = {}
@@ -208,6 +227,130 @@ class PortfolioAnalyzer:
     # [Keep all existing methods from the original class...]
     # Including: fetch_stock_info, calculate_portfolio_metrics, simulate_historical_performance, etc.
     # [For brevity, I'm showing the new/modified methods above and indicating the rest should remain]
+
+    def fetch_alpha_vantage_data(self, symbol: str) -> Dict:
+        """Fetch data from Alpha Vantage API"""
+        api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://www.alphavantage.co/query"
+            quote_params = {
+                'function': 'GLOBAL_QUOTE',
+                'symbol': symbol,
+                'apikey': api_key
+            }
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if 'Global Quote' in data:
+                quote = data['Global Quote']
+                current_price = float(quote.get('05. price', 0))
+                
+                # Get basic company overview
+                overview_params = {
+                    'function': 'OVERVIEW',
+                    'symbol': symbol,
+                    'apikey': api_key
+                }
+                
+                overview_response = requests.get(quote_url, params=overview_params, timeout=10)
+                overview_data = overview_response.json()
+                
+                return {
+                    'symbol': symbol,
+                    'name': overview_data.get('Name', symbol),
+                    'sector': overview_data.get('Sector', 'Unknown'),
+                    'industry': overview_data.get('Industry', 'Unknown'),
+                    'current_price': current_price,
+                    'dividend_yield': float(overview_data.get('DividendYield', 0)) * 100 if overview_data.get('DividendYield') else 0,
+                    'dividend_rate': float(overview_data.get('DividendPerShare', 0)),
+                    'payout_ratio': 0,  # Not available in Alpha Vantage
+                    'pe_ratio': float(overview_data.get('PERatio', 0)),
+                    'market_cap': int(overview_data.get('MarketCapitalization', 0)),
+                    'beta': float(overview_data.get('Beta', 1)),
+                    'ex_dividend_date': overview_data.get('ExDividendDate'),
+                    'dividend_date': None,
+                    'country': overview_data.get('Country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"Alpha Vantage error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def fetch_fmp_data(self, symbol: str) -> Dict:
+        """Fetch data from Financial Modeling Prep API"""
+        api_key = st.secrets.get("FMP_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
+            quote_params = {'apikey': api_key}
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if data and len(data) > 0:
+                quote = data[0]
+                
+                # Get profile data
+                profile_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}"
+                profile_response = requests.get(profile_url, params=quote_params, timeout=10)
+                profile_data = profile_response.json()
+                
+                profile = profile_data[0] if profile_data else {}
+                
+                return {
+                    'symbol': symbol,
+                    'name': profile.get('companyName', symbol),
+                    'sector': profile.get('sector', 'Unknown'),
+                    'industry': profile.get('industry', 'Unknown'),
+                    'current_price': quote.get('price', 0),
+                    'dividend_yield': (quote.get('price', 1) / profile.get('lastDiv', 0) * 100) if profile.get('lastDiv') else 0,
+                    'dividend_rate': profile.get('lastDiv', 0),
+                    'payout_ratio': 0,  # Would need additional API call
+                    'pe_ratio': quote.get('pe', 0),
+                    'market_cap': profile.get('mktCap', 0),
+                    'beta': profile.get('beta', 1),
+                    'ex_dividend_date': None,
+                    'dividend_date': None,
+                    'country': profile.get('country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"FMP error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def manual_data_entry_fallback(self, symbol: str) -> Dict:
+        """Allow manual data entry when APIs fail"""
+        st.warning(f"⚠️ All APIs failed for {symbol}. Using fallback values.")
+        
+        # Return basic structure with default values
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector': self.sector_mapping.get(symbol, 'Unknown'),
+            'industry': 'Unknown',
+            'current_price': 0,  # User would need to enter manually
+            'dividend_yield': 0,
+            'dividend_rate': 0,
+            'payout_ratio': 0,
+            'pe_ratio': 0,
+            'market_cap': 0,
+            'beta': 1,
+            'ex_dividend_date': None,
+            'dividend_date': None,
+            'country': 'Unknown'
+        }
 
     def fetch_stock_info_fallback(self, symbol: str) -> Dict:
         """Fallback method using alternative data sources when Yahoo Finance is blocked"""
@@ -416,7 +559,7 @@ def main():
         ["📝 Create/Edit Portfolio", "📂 Load Saved Portfolio", "📁 Import Portfolio File", "🗑️ Clear Session"]
     )
     
-    portfolio_holdings = []
+    portfolio_holdings = []  # Initialize portfolio_holdings
     
     if portfolio_action == "🗑️ Clear Session":
         if st.sidebar.button("🗑️ Clear All Data", type="secondary"):
@@ -438,6 +581,7 @@ def main():
             
             if st.sidebar.button("✅ Use Saved Portfolio", type="primary"):
                 portfolio_holdings = saved_holdings
+                st.session_state.holdings = saved_holdings  # Also update holdings
                 st.sidebar.success("Loaded saved portfolio!")
         else:
             st.sidebar.info("No saved portfolio found. Create one first!")
@@ -556,7 +700,6 @@ def main():
                         st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
         
         elif input_method == "Manual Entry":
-            # [Keep existing manual entry code...]
             st.sidebar.subheader("Add Holdings")
             
             # Load existing holdings from session
@@ -585,10 +728,124 @@ def main():
                             # Add new holding
                             st.session_state.holdings.append({'symbol': symbol, 'shares': shares})
                             st.success(f"Added {shares} shares of {symbol}")
+            
+            # Display current holdings
+            if st.session_state.holdings:
+                st.sidebar.subheader("📋 Current Holdings")
+                for holding in st.session_state.holdings:
+                    st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
         
-        # [Keep other input methods...]
+        elif input_method == "Upload CSV":
+            st.sidebar.subheader("Upload Portfolio CSV")
+            uploaded_file = st.sidebar.file_uploader(
+                "Choose CSV file", 
+                type="csv",
+                help="CSV should have columns: symbol, shares"
+            )
+            
+            if uploaded_file:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    
+                    # Check required columns
+                    if 'symbol' not in df.columns:
+                        st.sidebar.error("CSV must contain 'symbol' column")
+                    elif 'shares' not in df.columns:
+                        st.sidebar.error("CSV must contain 'shares' column")
+                    else:
+                        # Convert to holdings format
+                        holdings = []
+                        for _, row in df.iterrows():
+                            holdings.append({
+                                'symbol': str(row['symbol']).upper().strip(),
+                                'shares': float(row['shares'])
+                            })
+                        
+                        st.session_state.holdings = holdings
+                        st.sidebar.success(f"Loaded {len(holdings)} holdings")
+                        
+                except Exception as e:
+                    st.sidebar.error(f"Error reading CSV: {str(e)}")
+        
+        else:  # Sample Portfolio
+            st.sidebar.subheader("Sample Dividend Portfolio")
+            st.session_state.holdings = [
+                {'symbol': 'AAPL', 'shares': 50},
+                {'symbol': 'MSFT', 'shares': 30},
+                {'symbol': 'JNJ', 'shares': 40},
+                {'symbol': 'PG', 'shares': 25},
+                {'symbol': 'KO', 'shares': 60},
+                {'symbol': 'JPM', 'shares': 20},
+                {'symbol': 'XOM', 'shares': 35},
+                {'symbol': 'VZ', 'shares': 45},
+                {'symbol': 'T', 'shares': 55},
+                {'symbol': 'PFE', 'shares': 40}
+            ]
+            st.sidebar.info("Using sample dividend-focused portfolio")
         
         portfolio_holdings = st.session_state.holdings
+        
+    elif portfolio_action == "📁 Import Portfolio File":
+        st.sidebar.subheader("📁 Import Portfolio")
+        
+        # File upload options
+        upload_format = st.sidebar.radio(
+            "File Format:",
+            ["CSV Format", "JSON Format (Full Backup)"]
+        )
+        
+        uploaded_file = st.sidebar.file_uploader(
+            f"Choose {upload_format.split()[0]} file",
+            type=["csv"] if "CSV" in upload_format else ["json"],
+            help="Upload your portfolio file to restore previous analysis"
+        )
+        
+        if uploaded_file:
+            try:
+                file_content = uploaded_file.read().decode('utf-8')
+                
+                if upload_format == "CSV Format":
+                    df = pd.read_csv(io.StringIO(file_content))
+                    
+                    # Check required columns
+                    if 'symbol' not in df.columns:
+                        st.sidebar.error("CSV must contain 'symbol' column")
+                    elif 'shares' not in df.columns:
+                        st.sidebar.error("CSV must contain 'shares' column")
+                    else:
+                        # Convert to holdings format
+                        imported_holdings = []
+                        for _, row in df.iterrows():
+                            imported_holdings.append({
+                                'symbol': str(row['symbol']).upper().strip(),
+                                'shares': float(row['shares'])
+                            })
+                        
+                        portfolio_holdings = imported_holdings
+                        st.session_state.holdings = imported_holdings  # Also update session
+                        st.sidebar.success(f"✅ Imported {len(imported_holdings)} holdings from CSV")
+                    
+                else:  # JSON Format
+                    data = json.loads(file_content)
+                    
+                    # Validate JSON structure
+                    if 'holdings' not in data:
+                        st.sidebar.error("Invalid portfolio file: missing 'holdings' data")
+                    else:
+                        imported_holdings = data['holdings']
+                        portfolio_holdings = imported_holdings
+                        st.session_state.holdings = imported_holdings  # Also update session
+                        
+                        # Update session with imported metadata
+                        st.session_state.portfolio_name = data.get('portfolio_name', 'Imported Portfolio')
+                        st.session_state.portfolio_notes = data.get('portfolio_notes', '')
+                        
+                        st.sidebar.success(f"✅ Imported portfolio: {data.get('portfolio_name', 'Imported Portfolio')}")
+                        if data.get('created_date'):
+                            st.sidebar.info(f"Created: {data['created_date'][:10]}")
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Import failed: {str(e)}")
     
     # Main analysis
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
