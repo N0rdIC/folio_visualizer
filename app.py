@@ -670,45 +670,83 @@ class PortfolioAnalyzer:
         # Combine all positions into portfolio performance
         portfolio_performance = pd.DataFrame()
         
-        # Get common date range (intersection of all stock data)
-        common_dates = None
+        # Handle mixed markets (US/European stocks) with different trading calendars
+        # Instead of requiring ALL stocks to have common dates, use majority overlap
+        
+        # Get date ranges for each stock
+        date_coverage = {}
         for symbol, data in all_data.items():
-            if common_dates is None:
-                common_dates = data.index
-            else:
-                common_dates = common_dates.intersection(data.index)
+            date_coverage[symbol] = set(data.index.date)
+        
+        # Find dates that exist for at least 70% of stocks (handles mixed markets)
+        all_dates = set()
+        for dates in date_coverage.values():
+            all_dates.update(dates)
+        
+        # Count how many stocks have data for each date
+        date_counts = {}
+        for date in all_dates:
+            count = sum(1 for stock_dates in date_coverage.values() if date in stock_dates)
+            date_counts[date] = count
+        
+        # Use dates where at least 70% of stocks have data
+        min_stocks_required = max(1, int(len(all_data) * 0.7))
+        common_dates = [date for date, count in date_counts.items() if count >= min_stocks_required]
+        common_dates = sorted(common_dates)
         
         if len(common_dates) == 0:
-            st.error("❌ No common date range found across stocks.")
+            st.error("❌ No overlapping dates found across stocks.")
+            st.info("💡 This often happens when mixing:")
+            st.write("• US stocks (NYSE/NASDAQ) with European stocks (Paris/Frankfurt)")
+            st.write("• Different market holidays and trading calendars")
+            st.write("• Try analyzing US and European stocks separately")
             return pd.DataFrame()
         
         if len(common_dates) < 50:
-            st.warning(f"⚠️ Limited common date range: {len(common_dates)} data points")
+            st.warning(f"⚠️ Limited overlapping dates: {len(common_dates)} trading days")
+            st.info("💡 Consider analyzing markets separately for better data coverage")
+        else:
+            st.info(f"📊 Using {len(common_dates)} trading days with data from {min_stocks_required}+ stocks")
         
         # Calculate portfolio metrics for each date
         for date in common_dates:
             portfolio_value = 0
             total_dividends = 0
+            stocks_with_data = 0
             
             for symbol, data in all_data.items():
-                if date in data.index:
-                    portfolio_value += data.loc[date, 'Position_Value']
-                    total_dividends += data.loc[date, 'Cumulative_Dividends']
+                # Convert date to match index format
+                date_timestamp = pd.Timestamp(date)
+                if date_timestamp in data.index:
+                    portfolio_value += data.loc[date_timestamp, 'Position_Value']
+                    total_dividends += data.loc[date_timestamp, 'Cumulative_Dividends']
+                    stocks_with_data += 1
             
-            portfolio_performance.loc[date, 'Portfolio_Value'] = portfolio_value
-            portfolio_performance.loc[date, 'Total_Dividends'] = total_dividends
-            portfolio_performance.loc[date, 'Total_Value'] = portfolio_value + total_dividends
-            
-            # Total return including dividends
-            if total_initial_value > 0:
-                portfolio_performance.loc[date, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
-                portfolio_performance.loc[date, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
-            else:
-                portfolio_performance.loc[date, 'Total_Return'] = 0
-                portfolio_performance.loc[date, 'Price_Only_Return'] = 0
+            # Only include dates where we have data for most stocks
+            if stocks_with_data >= min_stocks_required:
+                portfolio_performance.loc[date_timestamp, 'Portfolio_Value'] = portfolio_value
+                portfolio_performance.loc[date_timestamp, 'Total_Dividends'] = total_dividends
+                portfolio_performance.loc[date_timestamp, 'Total_Value'] = portfolio_value + total_dividends
+                portfolio_performance.loc[date_timestamp, 'Stocks_With_Data'] = stocks_with_data
+                
+                # Total return including dividends
+                if total_initial_value > 0:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
+                else:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = 0
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = 0
         
-        # Success message
-        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {len(common_dates)} trading days.")
+        # Success message with data quality info
+        avg_stocks_per_date = portfolio_performance['Stocks_With_Data'].mean() if not portfolio_performance.empty else 0
+        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {len(portfolio_performance)} trading days (avg {avg_stocks_per_date:.1f} stocks/day)")
+        
+        # Add data quality warning for mixed markets
+        if successful_fetches > 5:  # Only for larger portfolios
+            us_stocks = sum(1 for symbol in all_data.keys() if '.' not in symbol)
+            intl_stocks = successful_fetches - us_stocks
+            if us_stocks > 0 and intl_stocks > 0:
+                st.info(f"🌍 Mixed markets detected: {us_stocks} US stocks, {intl_stocks} international stocks. Data coverage: {avg_stocks_per_date:.1f}/{successful_fetches} stocks per day.")
         
         return portfolio_performance.sort_index()
 
@@ -865,9 +903,79 @@ class PortfolioAnalyzer:
             return self._generate_rule_based_analysis(portfolio_data, metrics)
 
     def _generate_rule_based_analysis(self, portfolio_data: pd.DataFrame, metrics: Dict) -> str:
-        """Generate rule-based portfolio analysis"""
+        """Generate rule-based portfolio analysis with problem identification"""
         
         analysis = []
+        
+        # Identify problematic stocks first
+        analysis.append("## 🚨 Portfolio Health Check")
+        
+        problem_stocks = []
+        warning_stocks = []
+        
+        for _, stock in portfolio_data.iterrows():
+            issues = []
+            warnings = []
+            
+            # Check for data quality issues
+            if stock['current_price'] <= 0:
+                issues.append("No current price data")
+            
+            if stock['dividend_yield'] == 0 and stock['dividend_rate'] == 0:
+                warnings.append("No dividend payments")
+            
+            if stock['payout_ratio'] > 100:
+                issues.append(f"Unsustainable payout ratio ({stock['payout_ratio']:.1f}%)")
+            elif stock['payout_ratio'] > 90:
+                warnings.append(f"High payout ratio ({stock['payout_ratio']:.1f}%)")
+            
+            if stock['pe_ratio'] > 50:
+                warnings.append(f"Very high P/E ratio ({stock['pe_ratio']:.1f})")
+            elif stock['pe_ratio'] <= 0:
+                warnings.append("No P/E ratio available")
+            
+            if stock['beta'] > 2.0:
+                warnings.append(f"Very high volatility (Beta {stock['beta']:.2f})")
+            
+            if stock['sector'] == 'Unknown':
+                warnings.append("Unknown sector classification")
+            
+            # Check for concentration risk
+            weight = stock['shares'] * stock['current_price'] / metrics['total_value'] * 100
+            if weight > 25:
+                warnings.append(f"High concentration ({weight:.1f}% of portfolio)")
+            
+            if issues:
+                problem_stocks.append(f"🔴 **{stock['symbol']}**: {', '.join(issues)}")
+            elif warnings:
+                warning_stocks.append(f"🟡 **{stock['symbol']}**: {', '.join(warnings)}")
+        
+        if problem_stocks:
+            analysis.append("### 🔴 Stocks with Issues:")
+            analysis.extend(problem_stocks)
+            analysis.append("")
+        
+        if warning_stocks:
+            analysis.append("### 🟡 Stocks to Monitor:")
+            analysis.extend(warning_stocks[:5])  # Show top 5 warnings
+            if len(warning_stocks) > 5:
+                analysis.append(f"... and {len(warning_stocks) - 5} more")
+            analysis.append("")
+        
+        if not problem_stocks and not warning_stocks:
+            analysis.append("✅ **No major issues detected** - portfolio looks healthy!")
+            analysis.append("")
+        
+        # Market mix analysis
+        us_stocks = portfolio_data[~portfolio_data['symbol'].str.contains('\\.', na=False)]
+        intl_stocks = portfolio_data[portfolio_data['symbol'].str.contains('\\.', na=False)]
+        
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            analysis.append("### 🌍 Mixed Market Detection:")
+            analysis.append(f"• **US Stocks**: {len(us_stocks)} ({len(us_stocks)/len(portfolio_data)*100:.1f}%)")
+            analysis.append(f"• **International**: {len(intl_stocks)} ({len(intl_stocks)/len(portfolio_data)*100:.1f}%)")
+            analysis.append("• **Note**: Mixed markets may have limited historical data overlap")
+            analysis.append("")
         
         # Overall Assessment
         analysis.append("## 📊 Overall Portfolio Assessment")
@@ -908,7 +1016,8 @@ class PortfolioAnalyzer:
             analysis.append(f"⚠️ **Poor Diversification**: Only {num_sectors} sectors represented - high concentration risk.")
         
         if max_sector_weight > 0.4:
-            analysis.append(f"⚠️ **Sector Concentration Risk**: Largest sector represents {max_sector_weight*100:.1f}% of portfolio.")
+            max_sector = sector_allocation['weight'].idxmax()
+            analysis.append(f"⚠️ **Sector Concentration Risk**: {max_sector} represents {max_sector_weight*100:.1f}% of portfolio.")
         
         # Top Holdings Analysis
         analysis.append("\n## 🏆 Top Holdings Analysis")
@@ -925,41 +1034,85 @@ class PortfolioAnalyzer:
         # Dividend Sustainability
         analysis.append("\n## 💰 Dividend Sustainability")
         
-        avg_payout_ratio = portfolio_data['payout_ratio'].mean()
-        if avg_payout_ratio > 80:
-            analysis.append(f"⚠️ **High Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% may indicate dividend sustainability risks.")
-        elif avg_payout_ratio > 60:
-            analysis.append(f"⚡ **Moderate Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% is reasonable but worth monitoring.")
+        # Filter out stocks with no payout ratio data
+        valid_payout_ratios = portfolio_data[portfolio_data['payout_ratio'] > 0]['payout_ratio']
+        if len(valid_payout_ratios) > 0:
+            avg_payout_ratio = valid_payout_ratios.mean()
+            if avg_payout_ratio > 80:
+                analysis.append(f"⚠️ **High Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% may indicate dividend sustainability risks.")
+            elif avg_payout_ratio > 60:
+                analysis.append(f"⚡ **Moderate Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% is reasonable but worth monitoring.")
+            else:
+                analysis.append(f"✅ **Conservative Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% suggests sustainable dividends.")
         else:
-            analysis.append(f"✅ **Conservative Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% suggests sustainable dividends.")
+            analysis.append("ℹ️ **Limited Payout Data**: Unable to assess dividend sustainability - consider adding dividend-paying stocks.")
         
         # Recommendations
-        analysis.append("\n## 🎯 Recommendations")
+        analysis.append("\n## 🎯 Specific Recommendations")
         
         recommendations = []
         
+        # Address identified problems first
+        if problem_stocks:
+            recommendations.append(f"• **🔴 Priority**: Address {len(problem_stocks)} stocks with data/fundamental issues")
+        
+        if warning_stocks:
+            recommendations.append(f"• **🟡 Monitor**: Keep close watch on {len(warning_stocks)} stocks with potential concerns")
+        
+        # Geographic diversification
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            recommendations.append("• **🌍 Mixed Markets**: Consider analyzing US and international holdings separately for better insights")
+        
+        # Standard recommendations
         if num_sectors < 5:
-            recommendations.append("• **Increase sector diversification** by adding positions in underrepresented sectors")
+            recommendations.append("• **🎯 Diversification**: Add positions in underrepresented sectors")
         
         if max_sector_weight > 0.4:
-            recommendations.append("• **Reduce sector concentration** by rebalancing overweight positions")
+            recommendations.append("• **⚖️ Rebalancing**: Reduce overweight sector positions")
         
         if largest_position > 0.15:
-            recommendations.append("• **Consider reducing position size** in largest holdings to manage concentration risk")
+            recommendations.append("• **📊 Position Size**: Consider reducing largest individual positions")
         
         if dividend_yield < 3:
-            recommendations.append("• **Add higher-yielding dividend stocks** to increase income generation")
+            recommendations.append("• **💰 Income**: Add higher-yielding dividend stocks for better income generation")
         
-        if avg_payout_ratio > 70:
-            recommendations.append("• **Review companies with high payout ratios** for dividend sustainability")
+        if len(valid_payout_ratios) > 0 and valid_payout_ratios.mean() > 70:
+            recommendations.append("• **🔍 Sustainability**: Review high payout ratio companies for dividend safety")
         
         if beta > 1.3:
-            recommendations.append("• **Consider adding defensive stocks** to reduce overall portfolio volatility")
+            recommendations.append("• **🛡️ Risk**: Add defensive stocks to reduce overall portfolio volatility")
+        
+        # Data quality recommendations
+        stocks_with_missing_data = sum(1 for _, stock in portfolio_data.iterrows() if stock['current_price'] <= 0)
+        if stocks_with_missing_data > 0:
+            recommendations.append("• **📊 Data Quality**: Verify symbols and consider alternative data sources for problematic stocks")
         
         if len(recommendations) == 0:
-            recommendations.append("• **Well-balanced portfolio** - continue monitoring and periodic rebalancing")
+            recommendations.append("• **✅ Well-Balanced**: Portfolio shows good balance - continue monitoring and periodic rebalancing")
         
         analysis.extend(recommendations)
+        
+        # Summary score
+        analysis.append("\n## 📋 Portfolio Health Score")
+        
+        score = 100
+        score -= len(problem_stocks) * 15  # -15 for each major issue
+        score -= len(warning_stocks) * 5   # -5 for each warning
+        score -= max(0, (largest_position - 0.15) * 100)  # Concentration penalty
+        score -= max(0, (8 - num_sectors) * 5)  # Diversification penalty
+        score = max(0, min(100, score))
+        
+        if score >= 80:
+            score_emoji = "🟢"
+            score_text = "Excellent"
+        elif score >= 60:
+            score_emoji = "🟡"
+            score_text = "Good"
+        else:
+            score_emoji = "🔴"
+            score_text = "Needs Attention"
+        
+        analysis.append(f"{score_emoji} **Overall Score: {score:.0f}/100 ({score_text})**")
         
         return "\n".join(analysis)
 
@@ -1470,6 +1623,83 @@ def main():
         # Historical Performance Analysis
         st.header("📊 Historical Performance Analysis")
         st.info("💡 **Total Return** includes both price appreciation AND dividend reinvestment")
+        
+        # Market composition analysis
+        us_stocks = [h for h in portfolio_holdings if '.' not in h['symbol']]
+        intl_stocks = [h for h in portfolio_holdings if '.' in h['symbol']]
+        
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"🇺🇸 **US Stocks**: {len(us_stocks)} holdings")
+            with col2:
+                st.info(f"🌍 **International**: {len(intl_stocks)} holdings")
+            
+            st.warning("⚠️ **Mixed Markets Detected**: US and international stocks have different trading calendars, which may limit historical data overlap. Consider analyzing separately for better coverage.")
+            
+            # Option to analyze separately
+            analyze_separately = st.checkbox("📊 Analyze markets separately for better data coverage", value=False)
+            
+            if analyze_separately:
+                # Analyze US stocks first
+                if us_stocks:
+                    st.subheader("🇺🇸 US Stocks Performance")
+                    with st.spinner("Analyzing US stocks..."):
+                        us_performance = analyzer.simulate_historical_performance(
+                            us_stocks, 
+                            years, 
+                            batch_size=batch_size, 
+                            delay=delay_between_batches
+                        )
+                    
+                    if not us_performance.empty:
+                        # Show US performance chart
+                        fig_us = go.Figure()
+                        fig_us.add_trace(go.Scatter(
+                            x=us_performance.index,
+                            y=us_performance['Total_Return'],
+                            mode='lines',
+                            name='US Stocks Total Return',
+                            line=dict(color='blue', width=2)
+                        ))
+                        fig_us.update_layout(
+                            title="US Stocks - Total Return",
+                            xaxis_title="Date",
+                            yaxis_title="Return (%)",
+                            height=300
+                        )
+                        st.plotly_chart(fig_us, use_container_width=True)
+                
+                # Analyze International stocks
+                if intl_stocks:
+                    st.subheader("🌍 International Stocks Performance")
+                    with st.spinner("Analyzing international stocks..."):
+                        intl_performance = analyzer.simulate_historical_performance(
+                            intl_stocks, 
+                            years, 
+                            batch_size=batch_size, 
+                            delay=delay_between_batches
+                        )
+                    
+                    if not intl_performance.empty:
+                        # Show International performance chart
+                        fig_intl = go.Figure()
+                        fig_intl.add_trace(go.Scatter(
+                            x=intl_performance.index,
+                            y=intl_performance['Total_Return'],
+                            mode='lines',
+                            name='International Stocks Total Return',
+                            line=dict(color='green', width=2)
+                        ))
+                        fig_intl.update_layout(
+                            title="International Stocks - Total Return",
+                            xaxis_title="Date",
+                            yaxis_title="Return (%)",
+                            height=300
+                        )
+                        st.plotly_chart(fig_intl, use_container_width=True)
+                
+                return  # Skip combined analysis if analyzing separately
         
         with st.spinner("Calculating historical performance..."):
             years = int(analysis_period[0]) if analysis_period[0].isdigit() else int(analysis_period[:2])
