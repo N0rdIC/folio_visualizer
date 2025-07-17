@@ -666,11 +666,16 @@ def main():
         # Calculate historical performance to get ACTUAL annualized return
         st.info("📊 Calculating historical performance for accurate synthesis metrics...")
         years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
-        historical_performance = analyzer.simulate_historical_performance(
-            portfolio_holdings, 
-            years=years,
-            show_dividend_details=False  # Silent for synthesis calculation
-        )
+        
+        try:
+            historical_performance = analyzer.simulate_historical_performance(
+                portfolio_holdings, 
+                years=years,
+                show_dividend_details=False  # Silent for synthesis calculation
+            )
+        except Exception as e:
+            st.warning(f"Historical performance calculation failed: {str(e)}")
+            historical_performance = pd.DataFrame()  # Empty DataFrame as fallback
         
         # Now calculate synthesis metrics using actual historical data
         synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
