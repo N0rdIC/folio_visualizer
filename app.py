@@ -354,9 +354,12 @@ class PortfolioAnalyzer:
     def fetch_stock_info(self, symbol: str, retry_count: int = 3, use_fallback: bool = True) -> Dict:
         """Fetch comprehensive stock information with rate limiting and fallback options"""
         
-        # Add random delay to avoid hitting rate limits
-        delay = random.uniform(0.5, 1.5)  # Random delay between 0.5-1.5 seconds
-        time.sleep(delay)
+        # MANDATORY 1-second delay for Yahoo Finance to avoid rate limiting
+        time.sleep(1.0)
+        
+        # Add additional random delay to avoid hitting rate limits
+        additional_delay = random.uniform(0.2, 0.5)
+        time.sleep(additional_delay)
         
         for attempt in range(retry_count):
             try:
@@ -402,8 +405,8 @@ class PortfolioAnalyzer:
             except Exception as e:
                 error_msg = str(e).lower()
                 if "rate limit" in error_msg or "too many requests" in error_msg or "403" in error_msg or "blocked" in error_msg:
-                    # Exponential backoff for rate limiting
-                    wait_time = (2 ** attempt) + random.uniform(1, 3)
+                    # Exponential backoff for rate limiting with longer delays
+                    wait_time = 2 + (2 ** attempt) + random.uniform(1, 3)
                     st.warning(f"⚠️ Yahoo Finance rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
                     time.sleep(wait_time)
                     continue
@@ -565,8 +568,9 @@ class PortfolioAnalyzer:
                     continue
                 
                 try:
-                    # Add delay to avoid rate limiting
-                    time.sleep(random.uniform(0.5, 1.0))
+                    # MANDATORY 1-second delay for Yahoo Finance + additional random delay
+                    time.sleep(1.0)  # Base delay for Yahoo Finance
+                    time.sleep(random.uniform(0.3, 0.7))  # Additional random delay
                     
                     stock = yf.Ticker(symbol)
                     
@@ -577,11 +581,11 @@ class PortfolioAnalyzer:
                             hist = stock.history(start=start_date, end=end_date, auto_adjust=True, back_adjust=True)
                             if not hist.empty and len(hist) > 10:  # Need at least 10 data points
                                 break
-                            time.sleep(1)  # Wait between attempts
+                            time.sleep(2)  # Wait between attempts
                         except Exception as e:
                             if attempt == 2:  # Last attempt
                                 st.warning(f"Failed to fetch historical data for {symbol} after 3 attempts: {str(e)}")
-                            time.sleep(2)
+                            time.sleep(3)  # Longer wait between attempts
                     
                     if hist is None or hist.empty:
                         st.warning(f"No historical data available for {symbol}")
@@ -733,8 +737,9 @@ class PortfolioAnalyzer:
                 progress_bar.progress(overall_progress)
                 
                 try:
-                    # Add delay to avoid rate limiting
-                    time.sleep(random.uniform(0.3, 0.8))
+                    # MANDATORY 1-second delay for Yahoo Finance + additional random delay
+                    time.sleep(1.0)  # Base delay for Yahoo Finance
+                    time.sleep(random.uniform(0.2, 0.5))  # Additional random delay
                     
                     stock = yf.Ticker(symbol)
                     
@@ -1171,17 +1176,19 @@ def main():
     
     # Rate limiting options
     st.sidebar.subheader("⏱️ Rate Limiting")
+    st.sidebar.info("💡 Yahoo Finance: 1s mandatory delay per call")
+    
     batch_size = st.sidebar.select_slider(
         "Batch Size",
-        options=[5, 10, 15, 20, 25],
-        value=10,
+        options=[3, 5, 8, 10, 15],
+        value=5,
         help="Process stocks in smaller batches to avoid rate limits"
     )
     
     delay_between_batches = st.sidebar.select_slider(
         "Delay Between Batches (seconds)",
-        options=[2, 5, 10, 15, 20],
-        value=5,
+        options=[5, 10, 15, 20, 30],
+        value=10,
         help="Wait time between batches to respect API limits"
     )
     
@@ -1213,7 +1220,7 @@ def main():
     )
     
     # API status indicators
-    yf_status = "🟢 Available"
+    yf_status = "🟡 1s delay per call" 
     av_status = "🔴 No API Key" if not st.secrets.get("ALPHA_VANTAGE_API_KEY") else "🟢 Available"
     fmp_status = "🔴 No API Key" if not st.secrets.get("FMP_API_KEY") else "🟢 Available"
     
@@ -1234,7 +1241,7 @@ def main():
         except:
             st.sidebar.error("❌ Still rate limited")
     
-    st.sidebar.info("💡 If rate limited, wait 2-6 hours or enable fallback APIs")
+    st.sidebar.info("💡 If still rate limited, wait 2-6 hours or enable fallback APIs")
     
     # Main analysis
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
@@ -1245,9 +1252,9 @@ def main():
         
         st.info(f"Analyzing portfolio with {len(portfolio_holdings)} holdings using batch processing...")
         
-        # Show rate limiting info
-        estimated_time = (len(portfolio_holdings) / batch_size) * delay_between_batches
-        st.info(f"⏱️ Processing in batches of {batch_size} with {delay_between_batches}s delays. Estimated time: {estimated_time:.0f}s")
+        # Show rate limiting info with updated timing
+        estimated_time = (len(portfolio_holdings) * 1.5) + ((len(portfolio_holdings) / batch_size) * delay_between_batches)  # 1.5s per stock + batch delays
+        st.info(f"⏱️ Processing in batches of {batch_size} with {delay_between_batches}s delays + 1s per Yahoo Finance call. Estimated time: {estimated_time:.0f}s")
         
         # Fetch current data for all holdings with batch processing
         portfolio_data = []
