@@ -745,31 +745,8 @@ def main():
         # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
-        # Calculate historical performance to get ACTUAL annualized return
-        st.info("📊 Calculating historical performance for accurate synthesis metrics...")
-        years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
-        
-        try:
-            historical_performance = analyzer.simulate_historical_performance(
-                portfolio_holdings, 
-                years=years,
-                show_dividend_details=False  # Silent for synthesis calculation
-            )
-        except Exception as e:
-            st.warning(f"Historical performance calculation failed: {str(e)}")
-            historical_performance = pd.DataFrame()  # Empty DataFrame as fallback
-        
-        # Now calculate synthesis metrics using actual historical data
-        try:
-            synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
-        except TypeError as e:
-            st.warning(f"Using fallback synthesis calculation: {str(e)}")
-            # Fallback to basic synthesis without historical data
-            synthesis_metrics = analyzer.calculate_synthesis_metrics_basic(portfolio_df, metrics)
-        except Exception as e:
-            st.error(f"Error calculating synthesis metrics: {str(e)}")
-            # Fallback to basic synthesis without historical data
-            synthesis_metrics = analyzer.calculate_synthesis_metrics_basic(portfolio_df, metrics)
+        # Calculate initial synthesis metrics (with estimates)
+        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
         
         # 🎯 SYNTHESIS TABLE (PROMINENT AT TOP)
         st.header("🎯 Portfolio Synthesis Metrics")
@@ -798,7 +775,7 @@ def main():
             st.metric(
                 "Ann. Total Return (Div)", 
                 f"{return_color} {synthesis_metrics['annualized_total_return']:.1f}%",
-                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated (insufficient historical data)'}"
+                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated (will update after historical analysis)'}"
             )
         
         with col4:
@@ -809,11 +786,9 @@ def main():
                 help="Sector balance: More sectors + balanced allocation + no concentration >25%"
             )
         
-        # Show data source for annualized return
-        if synthesis_metrics.get('data_source') == 'actual_data':
-            st.success("📊 **Annualized return calculated from actual historical performance data**")
-        else:
-            st.warning("📈 **Annualized return estimated** (run historical analysis for actual data)")
+        # Show initial data source
+        if synthesis_metrics.get('data_source') == 'estimated':
+            st.info("📈 **Annualized return currently estimated** - will update with actual data after historical analysis below")
         
         # Sector diversification detailed breakdown
         if 'diversification_breakdown' in synthesis_metrics:
