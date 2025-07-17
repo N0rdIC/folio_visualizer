@@ -531,7 +531,7 @@ class PortfolioAnalyzer:
         
         return metrics
 
-    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 5, batch_size: int = 10, delay: int = 5) -> pd.DataFrame:
+    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 5, batch_size: int = 10, delay: int = 5, show_dividend_details: bool = False) -> pd.DataFrame:
         """Simulate historical portfolio performance with total return (price + dividends)"""
         
         end_date = datetime.now()
@@ -599,22 +599,105 @@ class PortfolioAnalyzer:
                     # Calculate position value over time
                     hist['Position_Value'] = hist['Close'] * shares
                     
-                    # Get dividend data and add to historical data
+                    # Get dividend data and add to historical data with multiple methods
+                    total_dividend_income = 0
+                    dividend_payments_found = 0
+                    
                     try:
+                        # Method 1: Try to get dividends using the standard method
+                        time.sleep(1.0)  # Rate limiting
+                        
                         dividends = stock.dividends
                         hist['Dividend_Income'] = 0
                         
                         if len(dividends) > 0:
-                            # Add dividends received on each date
-                            for date, div in dividends.items():
-                                # Handle timezone issues
-                                if hasattr(date, 'tz') and date.tz is not None:
-                                    date = date.tz_localize(None)
+                            if show_dividend_details:
+                                st.info(f"📊 Found {len(dividends)} dividend payments for {symbol}")
+                            
+                            # Add dividends received on each date with improved date matching
+                            for div_date, div_amount in dividends.items():
+                                try:
+                                    # Handle timezone issues for dividend dates
+                                    if hasattr(div_date, 'tz') and div_date.tz is not None:
+                                        div_date_normalized = div_date.tz_localize(None)
+                                    else:
+                                        div_date_normalized = div_date
+                                    
+                                    # Convert to date for matching with historical data
+                                    div_date_only = div_date_normalized.date()
+                                    
+                                    # Find matching dates in historical data (allowing for slight date differences)
+                                    hist_dates = [d.date() for d in hist.index]
+                                    
+                                    # Look for exact match first
+                                    if div_date_only in hist_dates:
+                                        match_date = next(d for d in hist.index if d.date() == div_date_only)
+                                        dividend_amount = float(div_amount) * shares
+                                        hist.loc[match_date, 'Dividend_Income'] += dividend_amount
+                                        total_dividend_income += dividend_amount
+                                        dividend_payments_found += 1
+                                    else:
+                                        # Look for closest date within 3 days (handles weekend/holiday shifts)
+                                        closest_date = None
+                                        min_diff = float('inf')
+                                        
+                                        for hist_date in hist.index:
+                                            date_diff = abs((hist_date.date() - div_date_only).days)
+                                            if date_diff <= 3 and date_diff < min_diff:
+                                                min_diff = date_diff
+                                                closest_date = hist_date
+                                        
+                                        if closest_date is not None:
+                                            dividend_amount = float(div_amount) * shares
+                                            hist.loc[closest_date, 'Dividend_Income'] += dividend_amount
+                                            total_dividend_income += dividend_amount
+                                            dividend_payments_found += 1
+                                            
+                                except Exception as div_error:
+                                    if show_dividend_details:
+                                        st.warning(f"Error processing dividend for {symbol} on {div_date}: {str(div_error)}")
+                                    continue
+                        
+                        # Method 2: If no dividends found, try alternative approach using stock info
+                        if total_dividend_income == 0:
+                            try:
+                                time.sleep(0.5)  # Additional rate limiting
+                                info = stock.info
+                                annual_dividend = info.get('dividendRate', 0)
                                 
-                                if date in hist.index:
-                                    hist.loc[date, 'Dividend_Income'] = div * shares
+                                if annual_dividend > 0:
+                                    if show_dividend_details:
+                                        st.info(f"📈 Using annual dividend rate method for {symbol}: ${annual_dividend}")
+                                    
+                                    # Distribute annual dividend quarterly (most common)
+                                    quarterly_dividend = annual_dividend / 4
+                                    
+                                    # Add quarterly dividends to approximate dates
+                                    for month in [3, 6, 9, 12]:  # March, June, September, December
+                                        for year in range(start_date.year, end_date.year + 1):
+                                            try:
+                                                approx_date = pd.Timestamp(year, month, 15)  # Mid-month
+                                                if approx_date in hist.index:
+                                                    dividend_amount = quarterly_dividend * shares
+                                                    hist.loc[approx_date, 'Dividend_Income'] += dividend_amount
+                                                    total_dividend_income += dividend_amount
+                                                    dividend_payments_found += 1
+                                            except:
+                                                continue
+                                
+                            except Exception as e:
+                                if show_dividend_details:
+                                    st.warning(f"Alternative dividend method failed for {symbol}: {str(e)}")
+                        
+                        if show_dividend_details:
+                            if total_dividend_income > 0:
+                                st.success(f"✅ {symbol}: ${total_dividend_income:.2f} total dividends ({dividend_payments_found} payments)")
+                            else:
+                                st.info(f"ℹ️ No dividend payments found for {symbol}")
+                            
                     except Exception as e:
-                        st.warning(f"Could not fetch dividend data for {symbol}: {str(e)}")
+                        if show_dividend_details:
+                            st.warning(f"Could not fetch dividend data for {symbol}: {str(e)}")
                         hist['Dividend_Income'] = 0
                     
                     # Calculate cumulative dividends (total dividends received up to each date)
@@ -745,10 +828,24 @@ class PortfolioAnalyzer:
                     portfolio_performance.loc[date_timestamp, 'Total_Return'] = 0
                     portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = 0
         
-        # Success message with data quality info
+        # Success message with dividend data summary
         avg_stocks_per_date = portfolio_performance['Stocks_With_Data'].mean() if not portfolio_performance.empty else 0
         actual_days = len(portfolio_performance)
+        
+        # Calculate total dividend information
+        total_portfolio_dividends = portfolio_performance['Total_Dividends'].iloc[-1] if not portfolio_performance.empty else 0
+        
         st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {actual_days} trading days (avg {avg_stocks_per_date:.1f} stocks/day)")
+        
+        # Dividend data summary
+        if total_portfolio_dividends > 0:
+            st.info(f"💰 Total dividends captured: ${total_portfolio_dividends:,.2f} over {years} years")
+        else:
+            st.warning("⚠️ No dividend data captured in historical analysis. This could mean:")
+            st.write("• Stocks don't pay dividends (growth stocks)")
+            st.write("• Dividend dates don't align with trading data")
+            st.write("• Rate limiting preventing dividend data fetch")
+            st.write("• Try stocks known for dividends: KO, JNJ, PG, T, VZ")
         
         # Add data quality warning for mixed markets
         if successful_fetches > 5:  # Only for larger portfolios
@@ -1404,14 +1501,71 @@ def main():
                 try:
                     csv_content = uploaded_file.read().decode('utf-8')
                     imported_holdings = analyzer.import_portfolio_from_csv(csv_content)
+                    
+                    # Sync with session state for editing capabilities
+                    st.session_state.holdings = imported_holdings.copy()
                     portfolio_holdings = imported_holdings
+                    
                     st.sidebar.success(f"Loaded {len(portfolio_holdings)} holdings")
                     
                     # Auto-save to session
                     analyzer.save_portfolio_to_session(portfolio_holdings, portfolio_name, portfolio_notes)
                     
+                    # Show edit interface for CSV uploads
+                    st.sidebar.info("💡 CSV loaded! You can now edit using the controls below or switch to Manual Entry mode.")
+                    
                 except Exception as e:
                     st.sidebar.error(f"Error reading CSV: {str(e)}")
+            
+            # Show editing interface even for CSV uploads
+            if st.session_state.holdings:
+                st.sidebar.subheader("📝 Edit Uploaded Portfolio")
+                
+                edit_mode = st.sidebar.checkbox("✏️ Edit CSV Portfolio", help="Enable editing of uploaded CSV portfolio")
+                
+                if edit_mode:
+                    st.sidebar.write("**Modify uploaded portfolio:**")
+                    
+                    holdings_to_remove = []
+                    holdings_to_update = []
+                    
+                    for i, holding in enumerate(st.session_state.holdings):
+                        col1, col2, col3 = st.sidebar.columns([2, 1, 1])
+                        
+                        with col1:
+                            st.write(f"{holding['symbol']}")
+                        
+                        with col2:
+                            new_shares = st.number_input(
+                                "Shares", 
+                                min_value=0.0, 
+                                value=float(holding['shares']), 
+                                step=1.0,
+                                key=f"csv_edit_shares_{i}",
+                                label_visibility="collapsed"
+                            )
+                            if new_shares != holding['shares']:
+                                holdings_to_update.append((i, new_shares))
+                        
+                        with col3:
+                            if st.button("🗑️", key=f"csv_remove_{i}", help=f"Remove {holding['symbol']}"):
+                                holdings_to_remove.append(i)
+                    
+                    # Apply updates
+                    if holdings_to_update:
+                        for i, new_shares in holdings_to_update:
+                            if new_shares > 0:
+                                st.session_state.holdings[i]['shares'] = new_shares
+                            else:
+                                holdings_to_remove.append(i)
+                    
+                    # Remove holdings
+                    for i in sorted(holdings_to_remove, reverse=True):
+                        st.session_state.holdings.pop(i)
+                        st.rerun()
+                    
+                    # Update portfolio_holdings with changes
+                    portfolio_holdings = st.session_state.holdings
         
         else:  # Sample Portfolio
             st.sidebar.subheader("Sample Dividend Portfolio")
@@ -1460,6 +1614,14 @@ def main():
         "Include AI Analysis", 
         value=True,
         help="Requires OpenAI API key in secrets"
+    )
+    
+    # Debugging options
+    st.sidebar.subheader("🔍 Debug Options")
+    show_dividend_details = st.sidebar.checkbox(
+        "Show Dividend Fetching Details",
+        value=False,
+        help="Show detailed dividend fetching progress (verbose)"
     )
     
     # Cache options
@@ -1760,7 +1922,8 @@ def main():
                             us_stocks, 
                             years, 
                             batch_size=batch_size, 
-                            delay=delay_between_batches
+                            delay=delay_between_batches,
+                            show_dividend_details=show_dividend_details
                         )
                     
                     if not us_performance.empty:
@@ -1789,7 +1952,8 @@ def main():
                             intl_stocks, 
                             years, 
                             batch_size=batch_size, 
-                            delay=delay_between_batches
+                            delay=delay_between_batches,
+                            show_dividend_details=show_dividend_details
                         )
                     
                     if not intl_performance.empty:
@@ -1818,7 +1982,8 @@ def main():
                 portfolio_holdings, 
                 years, 
                 batch_size=batch_size, 
-                delay=delay_between_batches
+                delay=delay_between_batches,
+                show_dividend_details=show_dividend_details
             )
         
         if not historical_performance.empty:
