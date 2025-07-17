@@ -660,9 +660,20 @@ def main():
         
         portfolio_df = pd.DataFrame(portfolio_data)
         
-        # Calculate metrics
+        # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
-        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
+        
+        # Calculate historical performance to get ACTUAL annualized return
+        st.info("📊 Calculating historical performance for accurate synthesis metrics...")
+        years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
+        historical_performance = analyzer.simulate_historical_performance(
+            portfolio_holdings, 
+            years=years,
+            show_dividend_details=False  # Silent for synthesis calculation
+        )
+        
+        # Now calculate synthesis metrics using actual historical data
+        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
         
         # 🎯 SYNTHESIS TABLE (PROMINENT AT TOP)
         st.header("🎯 Portfolio Synthesis Metrics")
@@ -687,10 +698,11 @@ def main():
         
         with col3:
             return_color = "🟢" if synthesis_metrics['annualized_total_return'] > 12 else "🟡" if synthesis_metrics['annualized_total_return'] > 8 else "🔴"
+            data_source_icon = "📊" if synthesis_metrics.get('data_source') == 'actual_data' else "📈"
             st.metric(
                 "Ann. Total Return (Div)", 
                 f"{return_color} {synthesis_metrics['annualized_total_return']:.1f}%",
-                help="Expected annual return with dividends"
+                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated (insufficient historical data)'}"
             )
         
         with col4:
@@ -701,12 +713,29 @@ def main():
                 help="Sector balance: More sectors + balanced allocation + no concentration >25%"
             )
         
-        # Sector diversification explanation
+        # Show data source for annualized return
+        if synthesis_metrics.get('data_source') == 'actual_data':
+            st.success("📊 **Annualized return calculated from actual historical performance data**")
+        else:
+            st.warning("📈 **Annualized return estimated** (run historical analysis for actual data)")
+        
+        # Sector diversification detailed breakdown
+        if 'diversification_breakdown' in synthesis_metrics:
+            breakdown = synthesis_metrics['diversification_breakdown']
+            st.info(f"""
+            **🎯 Sector Diversification Breakdown:**
+            • **Sectors**: {breakdown['num_sectors']} sectors → {breakdown['sector_points']:.0f}/50 points (8 points per sector, max 50)
+            • **Concentration**: Largest sector {breakdown['max_sector_weight']:.1f}% → -{breakdown['concentration_penalty']:.0f} penalty (penalty if >25%)
+            • **Balance**: Distribution balance → +{breakdown['balance_score']:.0f}/30 points
+            • **Final Score**: {breakdown['sector_points']:.0f} - {breakdown['concentration_penalty']:.0f} + {breakdown['balance_score']:.0f} = {breakdown['final_score']:.0f}/100
+            """)
+        
+        # Show sector allocation details
         sector_allocation = metrics['sector_allocation']
         if len(sector_allocation) > 0:
             max_sector = sector_allocation['weight'].idxmax()
             max_weight = sector_allocation['weight'].max() * 100
-            st.info(f"**Diversification Details:** {len(sector_allocation)} sectors • Largest: {max_sector} ({max_weight:.1f}%) • Target: <25% per sector, 6+ sectors for best score")
+            st.write(f"**Current Allocation:** {len(sector_allocation)} sectors • Largest: {max_sector} ({max_weight:.1f}%)")
         
         # Quick insights
         insights = []
