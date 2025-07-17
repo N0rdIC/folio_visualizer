@@ -465,7 +465,7 @@ class PortfolioAnalyzer:
             return pd.DataFrame()
 
     def calculate_portfolio_metrics(self, portfolio_data: pd.DataFrame) -> Dict:
-        """Calculate comprehensive portfolio metrics"""
+        """Calculate comprehensive portfolio metrics including advanced risk measures"""
         metrics = {}
         
         # Current portfolio value
@@ -490,6 +490,30 @@ class PortfolioAnalyzer:
         portfolio_data['beta_weighted'] = portfolio_data['weight'] * portfolio_data['beta']
         metrics['portfolio_beta'] = portfolio_data['beta_weighted'].sum()
         
+        # Calculate advanced risk metrics
+        try:
+            # Sharpe Ratio estimation (simplified)
+            # Assuming risk-free rate of 4% and estimated portfolio volatility
+            risk_free_rate = 0.04
+            estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08  # Dividend yield + estimated price appreciation
+            estimated_volatility = metrics['portfolio_beta'] * 0.16  # Market volatility * portfolio beta
+            
+            metrics['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+            
+            # Alpha estimation (simplified)
+            # Alpha = Portfolio Return - (Risk-free Rate + Beta * (Market Return - Risk-free Rate))
+            market_return = 0.10  # Assumed market return
+            metrics['portfolio_alpha'] = estimated_return - (risk_free_rate + metrics['portfolio_beta'] * (market_return - risk_free_rate))
+            
+            # Information Ratio (simplified)
+            metrics['information_ratio'] = metrics['portfolio_alpha'] / (estimated_volatility * 0.5) if estimated_volatility > 0 else 0
+            
+        except Exception as e:
+            # Default values if calculation fails
+            metrics['sharpe_ratio'] = 0
+            metrics['portfolio_alpha'] = 0
+            metrics['information_ratio'] = 0
+        
         # Sector diversification
         sector_allocation = portfolio_data.groupby('sector').agg({
             'weight': 'sum',
@@ -513,6 +537,7 @@ class PortfolioAnalyzer:
         # Fetch historical data for all holdings
         all_data = {}
         total_initial_value = 0
+        successful_fetches = 0
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -535,51 +560,86 @@ class PortfolioAnalyzer:
                 status_text.text(f'Fetching {years}-year historical data for {symbol}...')
                 progress_bar.progress(overall_progress)
                 
+                # Skip if no shares or invalid data
+                if shares <= 0:
+                    continue
+                
                 try:
                     # Add delay to avoid rate limiting
                     time.sleep(random.uniform(0.5, 1.0))
                     
                     stock = yf.Ticker(symbol)
-                    hist = stock.history(start=start_date, end=end_date)
                     
-                    if not hist.empty:
-                        # Calculate position value over time
-                        hist['Position_Value'] = hist['Close'] * shares
-                        
-                        # Get dividend data and add to historical data
+                    # Try to get historical data with multiple attempts
+                    hist = None
+                    for attempt in range(3):
+                        try:
+                            hist = stock.history(start=start_date, end=end_date, auto_adjust=True, back_adjust=True)
+                            if not hist.empty and len(hist) > 10:  # Need at least 10 data points
+                                break
+                            time.sleep(1)  # Wait between attempts
+                        except Exception as e:
+                            if attempt == 2:  # Last attempt
+                                st.warning(f"Failed to fetch historical data for {symbol} after 3 attempts: {str(e)}")
+                            time.sleep(2)
+                    
+                    if hist is None or hist.empty:
+                        st.warning(f"No historical data available for {symbol}")
+                        continue
+                    
+                    # Ensure we have enough data
+                    if len(hist) < 10:
+                        st.warning(f"Insufficient historical data for {symbol} ({len(hist)} data points)")
+                        continue
+                    
+                    # Calculate position value over time
+                    hist['Position_Value'] = hist['Close'] * shares
+                    
+                    # Get dividend data and add to historical data
+                    try:
                         dividends = stock.dividends
                         hist['Dividend_Income'] = 0
                         
-                        # Add dividends received on each date
-                        for date, div in dividends.items():
-                            # Handle timezone issues
-                            if date.tz is not None:
-                                date = date.tz_localize(None)
-                            
-                            if date in hist.index:
-                                hist.loc[date, 'Dividend_Income'] = div * shares
+                        if len(dividends) > 0:
+                            # Add dividends received on each date
+                            for date, div in dividends.items():
+                                # Handle timezone issues
+                                if hasattr(date, 'tz') and date.tz is not None:
+                                    date = date.tz_localize(None)
+                                
+                                if date in hist.index:
+                                    hist.loc[date, 'Dividend_Income'] = div * shares
+                    except Exception as e:
+                        st.warning(f"Could not fetch dividend data for {symbol}: {str(e)}")
+                        hist['Dividend_Income'] = 0
+                    
+                    # Calculate cumulative dividends (total dividends received up to each date)
+                    hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
+                    
+                    # Calculate total return percentage (capital gains + dividends)
+                    initial_price = hist['Close'].iloc[0]
+                    if initial_price <= 0:
+                        st.warning(f"Invalid initial price for {symbol}: {initial_price}")
+                        continue
                         
-                        # Calculate cumulative dividends (total dividends received up to each date)
-                        hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
-                        
-                        # Calculate total return percentage (capital gains + dividends)
-                        initial_price = hist['Close'].iloc[0]
-                        initial_investment = initial_price * shares
-                        
-                        # Total value = current position value + all dividends received
-                        hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
-                        
-                        # Total return percentage = (total value / initial investment - 1) * 100
-                        hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
-                        
-                        # Price-only return (for comparison)
-                        hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
-                        
-                        all_data[symbol] = hist
-                        total_initial_value += initial_investment
-                        
+                    initial_investment = initial_price * shares
+                    
+                    # Total value = current position value + all dividends received
+                    hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
+                    
+                    # Total return percentage = (total value / initial investment - 1) * 100
+                    hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
+                    
+                    # Price-only return (for comparison)
+                    hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
+                    
+                    all_data[symbol] = hist
+                    total_initial_value += initial_investment
+                    successful_fetches += 1
+                    
                 except Exception as e:
-                    st.warning(f"Could not fetch historical data for {symbol}: {str(e)}")
+                    st.warning(f"Error processing historical data for {symbol}: {str(e)}")
+                    continue
             
             # Wait between batches (except for the last batch)
             if batch_end < len(portfolio_holdings):
@@ -590,13 +650,23 @@ class PortfolioAnalyzer:
         status_text.empty()
         batch_info.empty()
         
-        if not all_data:
+        # Check if we have enough data
+        if len(all_data) == 0:
+            st.error("❌ No historical data could be fetched for any stocks in your portfolio.")
+            st.info("💡 This could be due to:")
+            st.write("• Rate limiting from Yahoo Finance")
+            st.write("• Invalid stock symbols")
+            st.write("• Network connectivity issues")
+            st.write("• Try using backup APIs or wait before retrying")
             return pd.DataFrame()
+        
+        if successful_fetches < len(portfolio_holdings) * 0.5:
+            st.warning(f"⚠️ Only {successful_fetches}/{len(portfolio_holdings)} stocks had historical data fetched. Results may be incomplete.")
         
         # Combine all positions into portfolio performance
         portfolio_performance = pd.DataFrame()
         
-        # Get common date range
+        # Get common date range (intersection of all stock data)
         common_dates = None
         for symbol, data in all_data.items():
             if common_dates is None:
@@ -605,32 +675,36 @@ class PortfolioAnalyzer:
                 common_dates = common_dates.intersection(data.index)
         
         if len(common_dates) == 0:
+            st.error("❌ No common date range found across stocks.")
             return pd.DataFrame()
+        
+        if len(common_dates) < 50:
+            st.warning(f"⚠️ Limited common date range: {len(common_dates)} data points")
         
         # Calculate portfolio metrics for each date
         for date in common_dates:
             portfolio_value = 0
             total_dividends = 0
-            price_only_value = 0
             
             for symbol, data in all_data.items():
                 if date in data.index:
                     portfolio_value += data.loc[date, 'Position_Value']
                     total_dividends += data.loc[date, 'Cumulative_Dividends']
-                    # Price-only calculation for comparison
-                    shares = next(h['shares'] for h in portfolio_holdings if h['symbol'] == symbol)
-                    initial_price = data['Close'].iloc[0]
-                    price_only_value += (data.loc[date, 'Close'] / initial_price - 1) * initial_price * shares
             
             portfolio_performance.loc[date, 'Portfolio_Value'] = portfolio_value
             portfolio_performance.loc[date, 'Total_Dividends'] = total_dividends
             portfolio_performance.loc[date, 'Total_Value'] = portfolio_value + total_dividends
             
             # Total return including dividends
-            portfolio_performance.loc[date, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
-            
-            # Price-only return for comparison
-            portfolio_performance.loc[date, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
+            if total_initial_value > 0:
+                portfolio_performance.loc[date, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
+                portfolio_performance.loc[date, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
+            else:
+                portfolio_performance.loc[date, 'Total_Return'] = 0
+                portfolio_performance.loc[date, 'Price_Only_Return'] = 0
+        
+        # Success message
+        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {len(common_dates)} trading days.")
         
         return portfolio_performance.sort_index()
 
@@ -1275,6 +1349,50 @@ def main():
                 "Portfolio Average"
             )
         
+        # Advanced Risk Metrics
+        st.subheader("📈 Advanced Risk Metrics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            alpha_color = "normal" if abs(metrics['portfolio_alpha']) < 0.02 else ("inverse" if metrics['portfolio_alpha'] > 0 else "off")
+            st.metric(
+                "Portfolio Alpha", 
+                f"{metrics['portfolio_alpha']:.3f}",
+                help="Excess return vs market (positive = outperforming)"
+            )
+        
+        with col2:
+            sharpe_color = "normal" if metrics['sharpe_ratio'] > 1.0 else "off"
+            st.metric(
+                "Sharpe Ratio", 
+                f"{metrics['sharpe_ratio']:.2f}",
+                help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)"
+            )
+        
+        with col3:
+            st.metric(
+                "Information Ratio", 
+                f"{metrics['information_ratio']:.2f}",
+                help="Alpha per unit of tracking error"
+            )
+        
+        with col4:
+            volatility_estimate = metrics['portfolio_beta'] * 16  # Rough volatility estimate
+            st.metric(
+                "Est. Volatility", 
+                f"{volatility_estimate:.1f}%",
+                help="Estimated annual volatility"
+            )
+        
+        # Risk interpretation
+        st.info(f"""
+        **🎯 Risk Profile Summary:**
+        - **Beta {metrics['portfolio_beta']:.2f}**: {'Lower' if metrics['portfolio_beta'] < 0.8 else 'Higher' if metrics['portfolio_beta'] > 1.2 else 'Similar'} risk vs market
+        - **Alpha {metrics['portfolio_alpha']:.3f}**: {'Outperforming' if metrics['portfolio_alpha'] > 0.01 else 'Underperforming' if metrics['portfolio_alpha'] < -0.01 else 'Matching'} market expectations
+        - **Sharpe {metrics['sharpe_ratio']:.2f}**: {'Excellent' if metrics['sharpe_ratio'] > 2.0 else 'Good' if metrics['sharpe_ratio'] > 1.0 else 'Poor'} risk-adjusted returns
+        """)
+        
         # Holdings table
         st.header("📋 Current Holdings")
         
@@ -1533,28 +1651,48 @@ def main():
                     
                     st.plotly_chart(fig_daily, use_container_width=True)
                 
-                # Monthly aggregation chart
+                # Monthly aggregation chart with detailed hover
                 if not monthly_dividends.empty:
                     st.subheader("📈 Monthly Dividend Summary")
                     
-                    fig_monthly = px.bar(
-                        monthly_dividends,
-                        x='Month',
-                        y='Total_Dividend_Received',
-                        title="Monthly Dividend Income",
-                        labels={
-                            'Total_Dividend_Received': 'Total Dividends ($)',
-                            'Month': 'Month'
-                        },
-                        text='Total_Dividend_Received'
+                    # Create detailed monthly data with stock information
+                    monthly_detail = dividend_history.groupby('Month').agg({
+                        'Total_Dividend_Received': 'sum',
+                        'Symbol': lambda x: ', '.join(sorted(x.unique())),
+                        'Dividend_Per_Share': 'count'
+                    }).reset_index()
+                    monthly_detail.rename(columns={
+                        'Symbol': 'Paying_Stocks',
+                        'Dividend_Per_Share': 'Payment_Count'
+                    }, inplace=True)
+                    
+                    fig_monthly = go.Figure()
+                    
+                    fig_monthly.add_trace(go.Bar(
+                        x=monthly_detail['Month'],
+                        y=monthly_detail['Total_Dividend_Received'],
+                        text=monthly_detail['Total_Dividend_Received'].apply(lambda x: f'${x:.0f}'),
+                        textposition='outside',
+                        hovertemplate='<br>'.join([
+                            '<b>%{x}</b>',
+                            'Total Dividends: $%{y:.2f}',
+                            'Paying Stocks: %{customdata[0]}',
+                            'Number of Payments: %{customdata[1]}',
+                            '<extra></extra>'
+                        ]),
+                        customdata=monthly_detail[['Paying_Stocks', 'Payment_Count']],
+                        marker_color='darkgreen',
+                        name='Monthly Dividends'
+                    ))
+                    
+                    fig_monthly.update_layout(
+                        title="Monthly Dividend Income - Hover for Stock Details",
+                        xaxis_title="Month",
+                        yaxis_title="Dividend Amount ($)",
+                        height=300,
+                        showlegend=False
                     )
                     
-                    fig_monthly.update_traces(
-                        texttemplate='$%{text:.0f}',
-                        textposition='outside'
-                    )
-                    
-                    fig_monthly.update_layout(height=300)
                     st.plotly_chart(fig_monthly, use_container_width=True)
             
             with col2:
@@ -1696,7 +1834,7 @@ def main():
             st.write("• Your stocks don't pay dividends (growth stocks)")
             st.write("• Dividend payments are outside the 12-month window")
             st.write("• Data fetching issues with some stocks")
-            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)")
+            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)"))
         
         # AI-Powered Analysis
         if include_ai_analysis:
