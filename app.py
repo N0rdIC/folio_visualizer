@@ -197,6 +197,88 @@ class PortfolioAnalyzer:
         
         return synthesis
 
+    def calculate_synthesis_metrics_basic(self, portfolio_data: pd.DataFrame, metrics: Dict) -> Dict:
+        """Calculate synthesis metrics without historical performance (fallback)"""
+        if metrics.get('total_value', 0) == 0:
+            return {
+                'sharpe_ratio': 0,
+                'mean_opportunity_margin': 0,
+                'annualized_total_return': 0,
+                'sector_diversification_score': 0,
+                'data_source': 'insufficient_data'
+            }
+        
+        synthesis = {}
+        
+        # 1. Sharpe Ratio (estimated)
+        risk_free_rate = 0.04
+        estimated_return = metrics.get('portfolio_dividend_yield', 0) / 100 + 0.08
+        estimated_volatility = metrics.get('portfolio_beta', 1) * 0.16
+        synthesis['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+        
+        # 2. Mean Opportunity Margin
+        valid_pe_data = portfolio_data[portfolio_data['pe_ratio'] > 0]
+        if len(valid_pe_data) > 0:
+            portfolio_weights = valid_pe_data['shares'] * valid_pe_data['current_price']
+            portfolio_weights = portfolio_weights / portfolio_weights.sum()
+            weighted_pe = (valid_pe_data['pe_ratio'] * portfolio_weights).sum()
+            market_pe = 20
+            synthesis['mean_opportunity_margin'] = ((market_pe - weighted_pe) / market_pe) * 100
+        else:
+            synthesis['mean_opportunity_margin'] = 0
+        
+        # 3. Annualized Total Return (estimated only)
+        dividend_yield = metrics.get('portfolio_dividend_yield', 0)
+        estimated_price_appreciation = 8
+        synthesis['annualized_total_return'] = dividend_yield + estimated_price_appreciation
+        synthesis['data_source'] = 'estimated'
+        
+        # 4. Sector Diversification Score
+        try:
+            sector_allocation = metrics.get('sector_allocation', pd.DataFrame())
+            num_sectors = len(sector_allocation)
+            
+            sector_points = min(50, num_sectors * 8)
+            
+            if len(sector_allocation) > 0:
+                max_sector_weight = sector_allocation['weight'].max()
+                concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)
+            else:
+                max_sector_weight = 0
+                concentration_penalty = 0
+            
+            if num_sectors > 0:
+                ideal_weight = 1.0 / num_sectors
+                deviations = abs(sector_allocation['weight'] - ideal_weight)
+                balance_score = max(0, 30 - deviations.sum() * 100)
+            else:
+                balance_score = 0
+            
+            final_score = sector_points - concentration_penalty + balance_score
+            synthesis['sector_diversification_score'] = max(0, min(100, final_score))
+            
+            synthesis['diversification_breakdown'] = {
+                'num_sectors': num_sectors,
+                'sector_points': sector_points,
+                'max_sector_weight': max_sector_weight * 100,
+                'concentration_penalty': concentration_penalty,
+                'balance_score': balance_score,
+                'final_score': final_score
+            }
+            
+        except Exception:
+            synthesis['sector_diversification_score'] = 0
+            synthesis['diversification_breakdown'] = {
+                'num_sectors': 0,
+                'sector_points': 0,
+                'max_sector_weight': 0,
+                'concentration_penalty': 0,
+                'balance_score': 0,
+                'final_score': 0
+            }
+        
+        return synthesis
+
     def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 3, show_dividend_details: bool = False) -> pd.DataFrame:
         """Simulate historical portfolio performance with total return (price + dividends)"""
         
@@ -678,7 +760,16 @@ def main():
             historical_performance = pd.DataFrame()  # Empty DataFrame as fallback
         
         # Now calculate synthesis metrics using actual historical data
-        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
+        try:
+            synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
+        except TypeError as e:
+            st.warning(f"Using fallback synthesis calculation: {str(e)}")
+            # Fallback to basic synthesis without historical data
+            synthesis_metrics = analyzer.calculate_synthesis_metrics_basic(portfolio_df, metrics)
+        except Exception as e:
+            st.error(f"Error calculating synthesis metrics: {str(e)}")
+            # Fallback to basic synthesis without historical data
+            synthesis_metrics = analyzer.calculate_synthesis_metrics_basic(portfolio_df, metrics)
         
         # 🎯 SYNTHESIS TABLE (PROMINENT AT TOP)
         st.header("🎯 Portfolio Synthesis Metrics")
