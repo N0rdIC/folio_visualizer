@@ -168,28 +168,326 @@ class PortfolioAnalyzer:
         estimated_price_appreciation = 8  # 8% estimated
         synthesis['annualized_total_return'] = dividend_yield + estimated_price_appreciation
         
-        # 4. Sector Diversification Score
+        # 4. Sector Diversification Score (explained)
         sector_allocation = metrics['sector_allocation']
         num_sectors = len(sector_allocation)
         
-        # Points for number of sectors
-        sector_points = min(50, num_sectors * 8)
+        # Explanation: Good diversification means:
+        # 1. Multiple sectors (more is better)
+        # 2. No single sector dominates (< 25% each)
+        # 3. Balanced distribution across sectors
         
-        # Penalty for concentration
+        # Points for number of sectors (0-50 points)
+        sector_points = min(50, num_sectors * 8)  # 8 points per sector, max 50
+        
+        # Penalty for concentration (0-50 penalty)
         max_sector_weight = sector_allocation['weight'].max() if len(sector_allocation) > 0 else 0
-        concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)
+        concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)  # Penalty if >25% in one sector
         
-        # Balance score
+        # Balance score (0-30 points)
         if num_sectors > 0:
-            ideal_weight = 1.0 / num_sectors
+            ideal_weight = 1.0 / num_sectors  # Perfect balance
             deviations = abs(sector_allocation['weight'] - ideal_weight)
             balance_score = max(0, 30 - deviations.sum() * 100)
         else:
             balance_score = 0
         
+        # Total: sector_points (0-50) - concentration_penalty (0-50) + balance_score (0-30) = 0-100
         synthesis['sector_diversification_score'] = max(0, min(100, sector_points - concentration_penalty + balance_score))
         
         return synthesis
+
+    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 3, show_dividend_details: bool = False) -> pd.DataFrame:
+        """Simulate historical portfolio performance with total return (price + dividends)"""
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=years*365)
+        
+        # Fetch historical data for all holdings
+        all_data = {}
+        total_initial_value = 0
+        successful_fetches = 0
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, holding in enumerate(portfolio_holdings):
+            symbol = holding['symbol']
+            shares = holding['shares']
+            
+            status_text.text(f'Fetching {years}-year historical data for {symbol}... ({i+1}/{len(portfolio_holdings)})')
+            progress_bar.progress((i + 1) / len(portfolio_holdings))
+            
+            # Skip if no shares
+            if shares <= 0:
+                continue
+            
+            try:
+                # 1-second delay for Yahoo Finance
+                time.sleep(1.0)
+                
+                stock = yf.Ticker(symbol)
+                
+                # Get historical data
+                hist = stock.history(start=start_date, end=end_date, auto_adjust=True, back_adjust=True)
+                
+                if hist.empty or len(hist) < 10:
+                    st.warning(f"Insufficient historical data for {symbol}")
+                    continue
+                
+                # Calculate position value over time
+                hist['Position_Value'] = hist['Close'] * shares
+                
+                # Get dividend data
+                total_dividend_income = 0
+                dividend_payments_found = 0
+                
+                try:
+                    dividends = stock.dividends
+                    hist['Dividend_Income'] = 0
+                    
+                    if len(dividends) > 0:
+                        if show_dividend_details:
+                            st.info(f"📊 Found {len(dividends)} dividend payments for {symbol}")
+                        
+                        # Add dividends received on each date
+                        for div_date, div_amount in dividends.items():
+                            try:
+                                # Handle timezone issues
+                                if hasattr(div_date, 'tz') and div_date.tz is not None:
+                                    div_date_normalized = div_date.tz_localize(None)
+                                else:
+                                    div_date_normalized = div_date
+                                
+                                div_date_only = div_date_normalized.date()
+                                hist_dates = [d.date() for d in hist.index]
+                                
+                                # Look for exact match or closest date within 3 days
+                                if div_date_only in hist_dates:
+                                    match_date = next(d for d in hist.index if d.date() == div_date_only)
+                                    dividend_amount = float(div_amount) * shares
+                                    hist.loc[match_date, 'Dividend_Income'] += dividend_amount
+                                    total_dividend_income += dividend_amount
+                                    dividend_payments_found += 1
+                                else:
+                                    # Look for closest date within 3 days
+                                    closest_date = None
+                                    min_diff = float('inf')
+                                    
+                                    for hist_date in hist.index:
+                                        date_diff = abs((hist_date.date() - div_date_only).days)
+                                        if date_diff <= 3 and date_diff < min_diff:
+                                            min_diff = date_diff
+                                            closest_date = hist_date
+                                    
+                                    if closest_date is not None:
+                                        dividend_amount = float(div_amount) * shares
+                                        hist.loc[closest_date, 'Dividend_Income'] += dividend_amount
+                                        total_dividend_income += dividend_amount
+                                        dividend_payments_found += 1
+                                        
+                            except Exception as div_error:
+                                if show_dividend_details:
+                                    st.warning(f"Error processing dividend for {symbol} on {div_date}: {str(div_error)}")
+                                continue
+                    
+                    if show_dividend_details:
+                        if total_dividend_income > 0:
+                            st.success(f"✅ {symbol}: ${total_dividend_income:.2f} total dividends ({dividend_payments_found} payments)")
+                        else:
+                            st.info(f"ℹ️ No dividend payments found for {symbol}")
+                        
+                except Exception as e:
+                    if show_dividend_details:
+                        st.warning(f"Could not fetch dividend data for {symbol}: {str(e)}")
+                    hist['Dividend_Income'] = 0
+                
+                # Calculate cumulative dividends
+                hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
+                
+                # Calculate total return percentage (capital gains + dividends)
+                initial_price = hist['Close'].iloc[0]
+                if initial_price <= 0:
+                    st.warning(f"Invalid initial price for {symbol}: {initial_price}")
+                    continue
+                    
+                initial_investment = initial_price * shares
+                
+                # Total value = current position value + all dividends received
+                hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
+                
+                # Total return percentage
+                hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
+                
+                # Price-only return
+                hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
+                
+                all_data[symbol] = hist
+                total_initial_value += initial_investment
+                successful_fetches += 1
+                
+            except Exception as e:
+                st.warning(f"Error processing historical data for {symbol}: {str(e)}")
+                continue
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Check if we have enough data
+        if len(all_data) == 0:
+            st.error("❌ No historical data could be fetched for any stocks in your portfolio.")
+            return pd.DataFrame()
+        
+        if successful_fetches < len(portfolio_holdings) * 0.5:
+            st.warning(f"⚠️ Only {successful_fetches}/{len(portfolio_holdings)} stocks had historical data fetched.")
+        
+        # Combine all positions into portfolio performance
+        portfolio_performance = pd.DataFrame()
+        
+        # Normalize dates to handle timezone issues
+        normalized_data = {}
+        for symbol, data in all_data.items():
+            data_copy = data.copy()
+            data_copy.index = data_copy.index.normalize().date
+            normalized_data[symbol] = data_copy
+        
+        # Find common dates
+        date_coverage = {}
+        for symbol, data in normalized_data.items():
+            date_coverage[symbol] = set(data.index)
+        
+        all_dates = set()
+        for dates in date_coverage.values():
+            all_dates.update(dates)
+        
+        # Count stocks per date
+        date_counts = {}
+        for date in all_dates:
+            count = sum(1 for stock_dates in date_coverage.values() if date in stock_dates)
+            date_counts[date] = count
+        
+        # Use dates where at least 70% of stocks have data
+        min_stocks_required = max(1, int(len(all_data) * 0.7))
+        common_dates = [date for date, count in date_counts.items() if count >= min_stocks_required]
+        common_dates = sorted(common_dates)
+        
+        if len(common_dates) == 0:
+            st.error("❌ No overlapping dates found across stocks.")
+            return pd.DataFrame()
+        
+        # Calculate portfolio metrics for each date
+        for date in common_dates:
+            portfolio_value = 0
+            total_dividends = 0
+            stocks_with_data = 0
+            
+            for symbol, data in normalized_data.items():
+                if date in data.index:
+                    portfolio_value += data.loc[date, 'Position_Value']
+                    total_dividends += data.loc[date, 'Cumulative_Dividends']
+                    stocks_with_data += 1
+            
+            if stocks_with_data >= min_stocks_required:
+                date_timestamp = pd.Timestamp(date)
+                portfolio_performance.loc[date_timestamp, 'Portfolio_Value'] = portfolio_value
+                portfolio_performance.loc[date_timestamp, 'Total_Dividends'] = total_dividends
+                portfolio_performance.loc[date_timestamp, 'Total_Value'] = portfolio_value + total_dividends
+                portfolio_performance.loc[date_timestamp, 'Stocks_With_Data'] = stocks_with_data
+                
+                # Total return including dividends
+                if total_initial_value > 0:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
+                else:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = 0
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = 0
+        
+        # Success message
+        actual_days = len(portfolio_performance)
+        total_portfolio_dividends = portfolio_performance['Total_Dividends'].iloc[-1] if not portfolio_performance.empty else 0
+        
+        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {actual_days} trading days")
+        
+        if total_portfolio_dividends > 0:
+            st.info(f"💰 Total dividends captured: ${total_portfolio_dividends:,.2f} over {years} years")
+        
+        return portfolio_performance.sort_index()
+
+    def generate_historical_dividend_calendar(self, portfolio_holdings: List[Dict]) -> pd.DataFrame:
+        """Generate historical dividend calendar showing actual payments from last year"""
+        dividend_history = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Get date range for last year
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        
+        for i, holding in enumerate(portfolio_holdings):
+            symbol = holding['symbol']
+            shares = holding['shares']
+            
+            status_text.text(f'Fetching dividend history for {symbol}... ({i+1}/{len(portfolio_holdings)})')
+            progress_bar.progress((i + 1) / len(portfolio_holdings))
+            
+            try:
+                # 1-second delay for Yahoo Finance
+                time.sleep(1.0)
+                
+                stock = yf.Ticker(symbol)
+                
+                # Get dividend history for the last year
+                dividends = stock.dividends
+                
+                # Filter dividends from last year
+                if len(dividends) > 0:
+                    dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                    
+                    recent_mask = (dividend_dates >= start_date) & (dividend_dates <= end_date)
+                    recent_dividends = dividends[recent_mask]
+                    recent_dividend_dates = dividend_dates[recent_mask]
+                    
+                    # Add each dividend payment to history
+                    for date, dividend_amount in zip(recent_dividend_dates, recent_dividends):
+                        dividend_history.append({
+                            'Date': date.date(),
+                            'Symbol': symbol,
+                            'Company': symbol,
+                            'Dividend_Per_Share': float(dividend_amount),
+                            'Shares_Owned': shares,
+                            'Total_Dividend_Received': float(dividend_amount) * shares,
+                            'Month': date.strftime('%Y-%m'),
+                            'Quarter': f"Q{((date.month-1)//3)+1} {date.year}"
+                        })
+            
+            except Exception as e:
+                st.warning(f"Could not fetch dividend history for {symbol}: {str(e)}")
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if dividend_history:
+            df = pd.DataFrame(dividend_history)
+            df = df.sort_values('Date')
+            
+            # Create daily aggregation
+            daily_dividends = df.groupby('Date').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: ', '.join(x.unique())
+            }).reset_index()
+            daily_dividends.rename(columns={'Symbol': 'Companies'}, inplace=True)
+            
+            # Create monthly aggregation
+            monthly_dividends = df.groupby('Month').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: len(x.unique())
+            }).reset_index()
+            monthly_dividends.rename(columns={'Symbol': 'Companies_Count'}, inplace=True)
+            
+            return df, daily_dividends, monthly_dividends
+        else:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     def import_portfolio_from_csv(self, csv_data: str) -> List[Dict]:
         """Import portfolio from CSV"""
@@ -328,7 +626,8 @@ def main():
     
     # Analysis settings
     st.sidebar.subheader("⚙️ Settings")
-    batch_size = st.sidebar.selectbox("Batch Size", [5, 10, 15], index=1)
+    analysis_period = st.sidebar.selectbox("Historical Period", ["1y", "2y", "3y", "5y"], index=2)
+    show_dividend_details = st.sidebar.checkbox("Show Dividend Details", value=False)
     
     # MAIN ANALYSIS
     portfolio_holdings = st.session_state.holdings
@@ -399,8 +698,15 @@ def main():
             st.metric(
                 "Sector Diversification", 
                 f"{div_color} {synthesis_metrics['sector_diversification_score']:.0f}/100",
-                help="Sector balance score"
+                help="Sector balance: More sectors + balanced allocation + no concentration >25%"
             )
+        
+        # Sector diversification explanation
+        sector_allocation = metrics['sector_allocation']
+        if len(sector_allocation) > 0:
+            max_sector = sector_allocation['weight'].idxmax()
+            max_weight = sector_allocation['weight'].max() * 100
+            st.info(f"**Diversification Details:** {len(sector_allocation)} sectors • Largest: {max_sector} ({max_weight:.1f}%) • Target: <25% per sector, 6+ sectors for best score")
         
         # Quick insights
         insights = []
@@ -488,6 +794,267 @@ def main():
             fig_holdings.update_layout(yaxis={'categoryorder': 'total ascending'})
             st.plotly_chart(fig_holdings, use_container_width=True)
         
+        # Historical Performance Analysis
+        st.header("📈 Historical Performance Analysis")
+        st.info("💡 **Total Return** includes both price appreciation AND dividend reinvestment")
+        
+        with st.spinner("Calculating historical performance..."):
+            years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
+            historical_performance = analyzer.simulate_historical_performance(
+                portfolio_holdings, 
+                years=years,
+                show_dividend_details=show_dividend_details
+            )
+        
+        if not historical_performance.empty:
+            # Performance chart with both total return and price-only return
+            fig_performance = make_subplots(
+                rows=3, cols=1,
+                subplot_titles=(
+                    f'Portfolio Value Over Time ({years} Years)', 
+                    'Total Return vs Price-Only Return (%)',
+                    'Cumulative Dividends Received'
+                ),
+                vertical_spacing=0.08
+            )
+            
+            # Portfolio value
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Portfolio_Value'],
+                    mode='lines',
+                    name='Portfolio Value',
+                    line=dict(color='blue', width=2)
+                ),
+                row=1, col=1
+            )
+            
+            # Total return vs price-only return
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Total_Return'],
+                    mode='lines',
+                    name='Total Return (w/ Dividends)',
+                    line=dict(color='green', width=2)
+                ),
+                row=2, col=1
+            )
+            
+            if 'Price_Only_Return' in historical_performance.columns:
+                fig_performance.add_trace(
+                    go.Scatter(
+                        x=historical_performance.index,
+                        y=historical_performance['Price_Only_Return'],
+                        mode='lines',
+                        name='Price-Only Return',
+                        line=dict(color='orange', width=2, dash='dash')
+                    ),
+                    row=2, col=1
+                )
+            
+            # Cumulative dividends
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Total_Dividends'],
+                    mode='lines',
+                    name='Cumulative Dividends',
+                    line=dict(color='purple', width=2),
+                    fill='tonexty'
+                ),
+                row=3, col=1
+            )
+            
+            fig_performance.update_layout(height=800, showlegend=True)
+            fig_performance.update_xaxes(title_text="Date", row=3, col=1)
+            fig_performance.update_yaxes(title_text="Value ($)", row=1, col=1)
+            fig_performance.update_yaxes(title_text="Return (%)", row=2, col=1)
+            fig_performance.update_yaxes(title_text="Dividends ($)", row=3, col=1)
+            
+            st.plotly_chart(fig_performance, use_container_width=True)
+            
+            # Performance summary with dividend impact
+            if len(historical_performance) > 1:
+                total_return = historical_performance['Total_Return'].iloc[-1]
+                price_only_return = historical_performance['Price_Only_Return'].iloc[-1] if 'Price_Only_Return' in historical_performance.columns else 0
+                dividend_contribution = total_return - price_only_return
+                annual_total_return = (1 + total_return/100) ** (1/years) - 1
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Return", f"{total_return:.1f}%", help="Includes price appreciation + dividends")
+                with col2:
+                    st.metric("Annualized Return", f"{annual_total_return*100:.1f}%", help="Compound annual growth rate")
+                with col3:
+                    final_dividends = historical_performance['Total_Dividends'].iloc[-1]
+                    st.metric("Total Dividends", f"${final_dividends:,.0f}", help="Cumulative dividends received")
+                with col4:
+                    st.metric("Dividend Contribution", f"{dividend_contribution:.1f}%", help="Return boost from dividends")
+                
+                st.info(f"""
+                📈 **{years}-Year Performance Summary:**
+                - **Total Return**: {total_return:.1f}% (includes dividends reinvested)
+                - **Price-Only Return**: {price_only_return:.1f}% (capital appreciation only)
+                - **Dividend Boost**: {dividend_contribution:.1f}% additional return from dividends
+                - **Annual Compound Rate**: {annual_total_return*100:.1f}% per year
+                """)
+        else:
+            st.warning("Unable to fetch sufficient historical data for performance analysis.")
+        
+        # Dividend Calendar - Historical Analysis
+        st.header("📅 Historical Dividend Calendar (Last 12 Months)")
+        st.info("💰 **Actual dividend payments received** - showing real dividend income history")
+        
+        dividend_history, daily_dividends, monthly_dividends = analyzer.generate_historical_dividend_calendar(portfolio_holdings)
+        
+        if not dividend_history.empty:
+            # Summary metrics
+            total_dividends_received = dividend_history['Total_Dividend_Received'].sum()
+            avg_monthly_dividends = monthly_dividends['Total_Dividend_Received'].mean() if not monthly_dividends.empty else 0
+            dividend_payments_count = len(dividend_history)
+            unique_companies = dividend_history['Symbol'].nunique()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Dividends Received", f"${total_dividends_received:,.2f}")
+            with col2:
+                st.metric("Average Monthly", f"${avg_monthly_dividends:,.2f}")
+            with col3:
+                st.metric("Total Payments", dividend_payments_count)
+            with col4:
+                st.metric("Dividend-Paying Stocks", unique_companies)
+            
+            # Main visualizations
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("📊 Daily Dividend Payments")
+                
+                if not daily_dividends.empty:
+                    fig_daily = go.Figure()
+                    
+                    fig_daily.add_trace(go.Bar(
+                        x=daily_dividends['Date'],
+                        y=daily_dividends['Total_Dividend_Received'],
+                        text=daily_dividends['Companies'],
+                        textposition='outside',
+                        hovertemplate='<br>'.join([
+                            'Date: %{x}',
+                            'Dividend: $%{y:.2f}',
+                            'Companies: %{text}',
+                            '<extra></extra>'
+                        ]),
+                        marker_color='green',
+                        name='Daily Dividends'
+                    ))
+                    
+                    fig_daily.update_layout(
+                        title="Daily Dividend Payments - Last 12 Months",
+                        xaxis_title="Date",
+                        yaxis_title="Dividend Amount ($)",
+                        height=400,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # Monthly aggregation chart
+                if not monthly_dividends.empty:
+                    st.subheader("📈 Monthly Dividend Summary")
+                    
+                    fig_monthly = go.Figure()
+                    
+                    fig_monthly.add_trace(go.Bar(
+                        x=monthly_dividends['Month'],
+                        y=monthly_dividends['Total_Dividend_Received'],
+                        text=monthly_dividends['Total_Dividend_Received'].apply(lambda x: f'${x:.0f}'),
+                        textposition='outside',
+                        marker_color='darkgreen',
+                        name='Monthly Dividends'
+                    ))
+                    
+                    fig_monthly.update_layout(
+                        title="Monthly Dividend Income",
+                        xaxis_title="Month",
+                        yaxis_title="Dividend Amount ($)",
+                        height=300,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            with col2:
+                st.subheader("🏢 Dividend by Company")
+                
+                # Company dividend summary
+                company_summary = dividend_history.groupby('Symbol').agg({
+                    'Total_Dividend_Received': 'sum',
+                    'Dividend_Per_Share': 'count',
+                    'Date': 'max'
+                }).reset_index()
+                company_summary.rename(columns={
+                    'Dividend_Per_Share': 'Payment_Count',
+                    'Date': 'Last_Payment'
+                }, inplace=True)
+                company_summary = company_summary.sort_values('Total_Dividend_Received', ascending=False)
+                
+                # Company pie chart
+                fig_pie = px.pie(
+                    company_summary.head(8),
+                    values='Total_Dividend_Received',
+                    names='Symbol',
+                    title="Dividend Distribution by Company"
+                )
+                fig_pie.update_layout(height=300)
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Top dividend payers table
+                st.subheader("🏆 Top Dividend Payers")
+                top_payers = company_summary.head(8).copy()
+                top_payers['Total_Dividend_Received'] = top_payers['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+                top_payers['Last_Payment'] = top_payers['Last_Payment'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                
+                st.dataframe(
+                    top_payers[['Symbol', 'Total_Dividend_Received', 'Payment_Count']],
+                    column_config={
+                        "Symbol": "Stock",
+                        "Total_Dividend_Received": "Total",
+                        "Payment_Count": "Payments"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Recent payments table
+            st.subheader("🕒 Recent Dividend Payments")
+            display_history = dividend_history.copy()
+            display_history['Date'] = display_history['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
+            display_history['Dividend_Per_Share'] = display_history['Dividend_Per_Share'].apply(lambda x: f"${x:.4f}")
+            display_history['Total_Dividend_Received'] = display_history['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+            display_history = display_history.sort_values('Date', ascending=False)
+            
+            recent_payments = display_history.head(10)
+            st.dataframe(
+                recent_payments[['Date', 'Symbol', 'Dividend_Per_Share', 'Total_Dividend_Received']],
+                column_config={
+                    "Date": "Date",
+                    "Symbol": "Stock",
+                    "Dividend_Per_Share": "Per Share", 
+                    "Total_Dividend_Received": "Amount"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+        
+        else:
+            st.warning("No dividend payments found in the last 12 months for this portfolio.")
+            st.info("💡 This could mean:")
+            st.write("• Your stocks don't pay dividends (growth stocks)")
+            st.write("• Dividend payments are outside the 12-month window")
+            st.write("• Try including dividend-paying stocks (e.g., KO, JNJ, PG)")
+        
         # Export
         st.subheader("📥 Export")
         
@@ -536,15 +1103,22 @@ def main():
         st.subheader("📊 About Portfolio Optimizer")
         st.markdown("""
         **Synthesis Metrics:**
-        - **Sharpe Coefficient**: Risk-adjusted return measure
-        - **Mean Opportunity Margin**: Valuation vs market average
-        - **Annualized Total Return**: Expected return with dividends
-        - **Sector Diversification**: Portfolio balance score
+        - **Sharpe Coefficient**: Risk-adjusted return measure (higher = better risk/return)
+        - **Mean Opportunity Margin**: Valuation vs market average (+% = undervalued, good!)
+        - **Annualized Total Return**: Expected return with dividends reinvested
+        - **Sector Diversification**: Portfolio balance score (0-100)
+        
+        **Sector Diversification Explained:**
+        - **Score Components**: Number of sectors (more is better) + Balance (avoid concentration >25%) + Equal distribution
+        - **Good Score (70+)**: 6+ sectors, no single sector >25%, balanced allocation
+        - **Poor Score (<50)**: Few sectors, high concentration, unbalanced
+        - **Example**: Technology 40% + Healthcare 60% = Poor (only 2 sectors, both >25%)
+        - **Example**: Tech 20% + Health 20% + Finance 20% + Energy 20% + Utilities 20% = Excellent (5 sectors, balanced)
         
         **CSV Format:** Your CSV should have columns: `symbol`, `shares`
         
         **Adding Stocks:**
-        - **Equal Weight**: Automatically balances all holdings
+        - **Equal Weight**: Automatically balances all holdings (9 stocks + 1 new = 10% each)
         - **Custom Shares**: Specify exact number of shares
         - **Custom Weight**: Target percentage allocation
         """)
