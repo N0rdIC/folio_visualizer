@@ -670,15 +670,22 @@ class PortfolioAnalyzer:
         # Combine all positions into portfolio performance
         portfolio_performance = pd.DataFrame()
         
-        # Handle mixed markets (US/European stocks) with different trading calendars
-        # Instead of requiring ALL stocks to have common dates, use majority overlap
-        
-        # Get date ranges for each stock
-        date_coverage = {}
+        # Handle timezone issues by normalizing all dates to date-only (no time/timezone)
+        # Convert all stock data indexes to date-only for comparison
+        normalized_data = {}
         for symbol, data in all_data.items():
-            date_coverage[symbol] = set(data.index.date)
+            # Create a copy with date-only index
+            data_copy = data.copy()
+            # Convert timezone-aware datetime to date-only
+            data_copy.index = data_copy.index.normalize().date
+            normalized_data[symbol] = data_copy
         
-        # Find dates that exist for at least 70% of stocks (handles mixed markets)
+        # Find date coverage for each stock (now using date objects)
+        date_coverage = {}
+        for symbol, data in normalized_data.items():
+            date_coverage[symbol] = set(data.index)
+        
+        # Find dates that exist for at least 70% of stocks
         all_dates = set()
         for dates in date_coverage.values():
             all_dates.update(dates)
@@ -706,24 +713,25 @@ class PortfolioAnalyzer:
             st.warning(f"⚠️ Limited overlapping dates: {len(common_dates)} trading days")
             st.info("💡 Consider analyzing markets separately for better data coverage")
         else:
-            st.info(f"📊 Using {len(common_dates)} trading days with data from {min_stocks_required}+ stocks")
+            st.info(f"📊 Using {len(common_dates)} trading days with normalized date matching")
         
-        # Calculate portfolio metrics for each date
+        # Calculate portfolio metrics for each date using normalized data
         for date in common_dates:
             portfolio_value = 0
             total_dividends = 0
             stocks_with_data = 0
             
-            for symbol, data in all_data.items():
-                # Convert date to match index format
-                date_timestamp = pd.Timestamp(date)
-                if date_timestamp in data.index:
-                    portfolio_value += data.loc[date_timestamp, 'Position_Value']
-                    total_dividends += data.loc[date_timestamp, 'Cumulative_Dividends']
+            for symbol, data in normalized_data.items():
+                # Direct date comparison (no timezone issues)
+                if date in data.index:
+                    portfolio_value += data.loc[date, 'Position_Value']
+                    total_dividends += data.loc[date, 'Cumulative_Dividends']
                     stocks_with_data += 1
             
             # Only include dates where we have data for most stocks
             if stocks_with_data >= min_stocks_required:
+                # Convert date back to timestamp for portfolio_performance index
+                date_timestamp = pd.Timestamp(date)
                 portfolio_performance.loc[date_timestamp, 'Portfolio_Value'] = portfolio_value
                 portfolio_performance.loc[date_timestamp, 'Total_Dividends'] = total_dividends
                 portfolio_performance.loc[date_timestamp, 'Total_Value'] = portfolio_value + total_dividends
@@ -739,7 +747,8 @@ class PortfolioAnalyzer:
         
         # Success message with data quality info
         avg_stocks_per_date = portfolio_performance['Stocks_With_Data'].mean() if not portfolio_performance.empty else 0
-        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {len(portfolio_performance)} trading days (avg {avg_stocks_per_date:.1f} stocks/day)")
+        actual_days = len(portfolio_performance)
+        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {actual_days} trading days (avg {avg_stocks_per_date:.1f} stocks/day)")
         
         # Add data quality warning for mixed markets
         if successful_fetches > 5:  # Only for larger portfolios
@@ -1260,15 +1269,114 @@ def main():
                             st.session_state.holdings.append({'symbol': symbol, 'shares': shares})
                             st.success(f"Added {shares} shares of {symbol}")
             
-            # Display and manage current holdings
+            # Display and manage current holdings with editing capabilities
             if st.session_state.holdings:
-                st.sidebar.subheader("Current Holdings")
-                for i, holding in enumerate(st.session_state.holdings):
-                    col1, col2 = st.sidebar.columns([3, 1])
-                    col1.write(f"{holding['symbol']}: {holding['shares']} shares")
-                    if col2.button("❌", key=f"remove_{i}"):
+                st.sidebar.subheader("📝 Edit Current Holdings")
+                
+                # Add portfolio editing interface
+                edit_mode = st.sidebar.checkbox("✏️ Edit Mode", help="Enable editing of existing holdings")
+                
+                if edit_mode:
+                    st.sidebar.write("**Click to remove or edit holdings:**")
+                    
+                    # Create a list to track holdings to remove
+                    holdings_to_remove = []
+                    holdings_to_update = []
+                    
+                    for i, holding in enumerate(st.session_state.holdings):
+                        col1, col2, col3 = st.sidebar.columns([2, 1, 1])
+                        
+                        with col1:
+                            st.write(f"{holding['symbol']}")
+                        
+                        with col2:
+                            # Editable shares input
+                            new_shares = st.number_input(
+                                "Shares", 
+                                min_value=0.0, 
+                                value=float(holding['shares']), 
+                                step=1.0,
+                                key=f"edit_shares_{i}",
+                                label_visibility="collapsed"
+                            )
+                            if new_shares != holding['shares']:
+                                holdings_to_update.append((i, new_shares))
+                        
+                        with col3:
+                            if st.button("🗑️", key=f"remove_{i}", help=f"Remove {holding['symbol']}"):
+                                holdings_to_remove.append(i)
+                    
+                    # Apply updates
+                    if holdings_to_update:
+                        for i, new_shares in holdings_to_update:
+                            if new_shares > 0:
+                                st.session_state.holdings[i]['shares'] = new_shares
+                                st.sidebar.success(f"Updated {st.session_state.holdings[i]['symbol']}")
+                            else:
+                                holdings_to_remove.append(i)
+                    
+                    # Remove holdings (process in reverse order to maintain indices)
+                    for i in sorted(holdings_to_remove, reverse=True):
+                        removed_symbol = st.session_state.holdings[i]['symbol']
                         st.session_state.holdings.pop(i)
+                        st.sidebar.success(f"Removed {removed_symbol}")
                         st.rerun()
+                    
+                    # Bulk operations
+                    st.sidebar.write("**Bulk Operations:**")
+                    col1, col2 = st.sidebar.columns(2)
+                    
+                    with col1:
+                        if st.button("🗑️ Clear All", help="Remove all holdings"):
+                            st.session_state.holdings = []
+                            st.sidebar.success("Portfolio cleared!")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("📋 Duplicate", help="Duplicate current portfolio"):
+                            # Add "_copy" to each symbol
+                            duplicated = []
+                            for holding in st.session_state.holdings:
+                                duplicated.append({
+                                    'symbol': holding['symbol'],
+                                    'shares': holding['shares']
+                                })
+                            st.session_state.holdings.extend(duplicated)
+                            st.sidebar.success("Portfolio duplicated!")
+                            st.rerun()
+                
+                else:
+                    # Regular view mode
+                    st.sidebar.write("**Current Holdings:**")
+                    total_positions = 0
+                    for holding in st.session_state.holdings:
+                        st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
+                        total_positions += holding['shares']
+                    
+                    st.sidebar.info(f"📊 Total: {len(st.session_state.holdings)} stocks, {total_positions} shares")
+                
+                # Quick add popular stocks
+                st.sidebar.subheader("🚀 Quick Add")
+                popular_stocks = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'JNJ', 'PG', 'KO', 'XOM', 'VZ']
+                selected_stock = st.sidebar.selectbox("Popular Stocks", [''] + popular_stocks)
+                quick_shares = st.sidebar.number_input("Shares", min_value=1, value=10, key="quick_shares")
+                
+                if st.sidebar.button("➕ Quick Add") and selected_stock:
+                    # Check if stock already exists
+                    existing_index = None
+                    for i, holding in enumerate(st.session_state.holdings):
+                        if holding['symbol'] == selected_stock:
+                            existing_index = i
+                            break
+                    
+                    if existing_index is not None:
+                        # Update existing holding
+                        st.session_state.holdings[existing_index]['shares'] += quick_shares
+                        st.sidebar.success(f"Added {quick_shares} more shares to {selected_stock}")
+                    else:
+                        # Add new holding
+                        st.session_state.holdings.append({'symbol': selected_stock, 'shares': quick_shares})
+                        st.sidebar.success(f"Added {quick_shares} shares of {selected_stock}")
                 
                 # Save to session button
                 if st.sidebar.button("💾 Save Portfolio", type="primary"):
@@ -1278,6 +1386,9 @@ def main():
                         portfolio_notes
                     )
                     st.sidebar.success("Portfolio saved to session!")
+            
+            else:
+                st.sidebar.info("No holdings added yet. Use the form above to add stocks.")
             
             portfolio_holdings = st.session_state.holdings
         
@@ -2071,7 +2182,7 @@ def main():
             st.write("• Your stocks don't pay dividends (growth stocks)")
             st.write("• Dividend payments are outside the 12-month window")
             st.write("• Data fetching issues with some stocks")
-            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)")
+            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)"))
         
         # AI-Powered Analysis
         if include_ai_analysis:
