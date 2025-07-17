@@ -100,12 +100,438 @@ class PortfolioAnalyzer:
         """Load portfolio from session state"""
         return st.session_state.portfolio_holdings.copy()
 
+    def create_portfolio_backup(self, holdings: List[Dict], metrics: Dict = None, name: str = None) -> Dict:
+        """Create a comprehensive portfolio backup"""
+        backup = {
+            'portfolio_name': name or st.session_state.portfolio_name,
+            'portfolio_notes': st.session_state.portfolio_notes,
+            'holdings': holdings,
+            'created_date': datetime.now().isoformat(),
+            'total_holdings': len(holdings),
+            'app_version': '1.0.0'
+        }
+        
+        if metrics:
+            backup['summary_metrics'] = {
+                'total_value': metrics.get('total_value', 0),
+                'annual_dividends': metrics.get('annual_dividends', 0),
+                'portfolio_dividend_yield': metrics.get('portfolio_dividend_yield', 0),
+                'portfolio_beta': metrics.get('portfolio_beta', 1),
+                'weighted_pe': metrics.get('weighted_pe', 0)
+            }
+        
+        return backup
+
+    def export_portfolio_json(self, holdings: List[Dict], metrics: Dict = None, name: str = None) -> str:
+        """Export portfolio as JSON string"""
+        backup = self.create_portfolio_backup(holdings, metrics, name)
+        return json.dumps(backup, indent=2)
+
+    def export_portfolio_csv(self, portfolio_df: pd.DataFrame) -> str:
+        """Export portfolio as CSV string"""
+        # Create a comprehensive CSV with current market data
+        export_df = portfolio_df.copy()
+        
+        # Add calculated fields
+        export_df['Current_Value'] = export_df['shares'] * export_df['current_price']
+        export_df['Annual_Dividends'] = export_df['shares'] * export_df['dividend_rate']
+        export_df['Weight_Percent'] = (export_df['Current_Value'] / export_df['Current_Value'].sum()) * 100
+        
+        # Select and order columns for export
+        columns_to_export = [
+            'symbol', 'name', 'shares', 'current_price', 'Current_Value', 'Weight_Percent',
+            'sector', 'industry', 'country', 'dividend_yield', 'dividend_rate', 
+            'Annual_Dividends', 'payout_ratio', 'pe_ratio', 'beta', 'market_cap'
+        ]
+        
+        # Only include columns that exist
+        available_columns = [col for col in columns_to_export if col in export_df.columns]
+        
+        return export_df[available_columns].to_csv(index=False)
+
+    def import_portfolio_from_json(self, json_data: str) -> Tuple[List[Dict], Dict]:
+        """Import portfolio from JSON string"""
+        try:
+            data = json.loads(json_data)
+            
+            # Validate JSON structure
+            if 'holdings' not in data:
+                raise ValueError("Invalid portfolio file: missing 'holdings' data")
+            
+            holdings = data['holdings']
+            metadata = {
+                'name': data.get('portfolio_name', 'Imported Portfolio'),
+                'notes': data.get('portfolio_notes', ''),
+                'created_date': data.get('created_date', ''),
+                'total_holdings': data.get('total_holdings', len(holdings)),
+                'summary_metrics': data.get('summary_metrics', {})
+            }
+            
+            # Validate holdings structure
+            for holding in holdings:
+                if 'symbol' not in holding or 'shares' not in holding:
+                    raise ValueError("Invalid holding format: missing 'symbol' or 'shares'")
+            
+            return holdings, metadata
+            
+        except json.JSONDecodeError:
+            raise ValueError("Invalid JSON format")
+        except Exception as e:
+            raise ValueError(f"Error importing portfolio: {str(e)}")
+
+    def import_portfolio_from_csv(self, csv_data: str) -> List[Dict]:
+        """Import portfolio from CSV string"""
+        try:
+            df = pd.read_csv(io.StringIO(csv_data))
+            
+            # Check required columns
+            if 'symbol' not in df.columns:
+                raise ValueError("CSV must contain 'symbol' column")
+            
+            if 'shares' not in df.columns:
+                raise ValueError("CSV must contain 'shares' column")
+            
+            # Convert to holdings format
+            holdings = []
+            for _, row in df.iterrows():
+                holdings.append({
+                    'symbol': str(row['symbol']).upper().strip(),
+                    'shares': float(row['shares'])
+                })
+            
+            return holdings
+            
+        except Exception as e:
+            raise ValueError(f"Error importing CSV: {str(e)}")
+
+    def fetch_stock_info_fallback(self, symbol: str) -> Dict:
+        """Fallback method using alternative data sources when Yahoo Finance is blocked"""
+        
+        # Try Alpha Vantage if API key is available
+        if hasattr(st.secrets, "ALPHA_VANTAGE_API_KEY") and st.secrets.ALPHA_VANTAGE_API_KEY != "demo":
+            try:
+                av_data = self.fetch_alpha_vantage_data(symbol)
+                if av_data and av_data['current_price'] > 0:
+                    return av_data
+            except Exception as e:
+                st.warning(f"Alpha Vantage fallback failed for {symbol}: {str(e)}")
+        
+        # Try Financial Modeling Prep if API key is available  
+        if hasattr(st.secrets, "FMP_API_KEY") and st.secrets.FMP_API_KEY != "demo":
+            try:
+                fmp_data = self.fetch_fmp_data(symbol)
+                if fmp_data and fmp_data['current_price'] > 0:
+                    return fmp_data
+            except Exception as e:
+                st.warning(f"FMP fallback failed for {symbol}: {str(e)}")
+        
+        # Manual data entry fallback
+        return self.manual_data_entry_fallback(symbol)
+
+    def fetch_alpha_vantage_data(self, symbol: str) -> Dict:
+        """Fetch data from Alpha Vantage API"""
+        api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://www.alphavantage.co/query"
+            quote_params = {
+                'function': 'GLOBAL_QUOTE',
+                'symbol': symbol,
+                'apikey': api_key
+            }
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if 'Global Quote' in data:
+                quote = data['Global Quote']
+                current_price = float(quote.get('05. price', 0))
+                
+                # Get basic company overview
+                overview_params = {
+                    'function': 'OVERVIEW',
+                    'symbol': symbol,
+                    'apikey': api_key
+                }
+                
+                overview_response = requests.get(quote_url, params=overview_params, timeout=10)
+                overview_data = overview_response.json()
+                
+                return {
+                    'symbol': symbol,
+                    'name': overview_data.get('Name', symbol),
+                    'sector': overview_data.get('Sector', 'Unknown'),
+                    'industry': overview_data.get('Industry', 'Unknown'),
+                    'current_price': current_price,
+                    'dividend_yield': float(overview_data.get('DividendYield', 0)) * 100 if overview_data.get('DividendYield') else 0,
+                    'dividend_rate': float(overview_data.get('DividendPerShare', 0)),
+                    'payout_ratio': 0,  # Not available in Alpha Vantage
+                    'pe_ratio': float(overview_data.get('PERatio', 0)),
+                    'market_cap': int(overview_data.get('MarketCapitalization', 0)),
+                    'beta': float(overview_data.get('Beta', 1)),
+                    'ex_dividend_date': overview_data.get('ExDividendDate'),
+                    'dividend_date': None,
+                    'country': overview_data.get('Country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"Alpha Vantage error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def fetch_fmp_data(self, symbol: str) -> Dict:
+        """Fetch data from Financial Modeling Prep API"""
+        api_key = st.secrets.get("FMP_API_KEY")
+        if not api_key or api_key == "demo":
+            return None
+            
+        try:
+            # Get quote data
+            quote_url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
+            quote_params = {'apikey': api_key}
+            
+            response = requests.get(quote_url, params=quote_params, timeout=10)
+            data = response.json()
+            
+            if data and len(data) > 0:
+                quote = data[0]
+                
+                # Get profile data
+                profile_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}"
+                profile_response = requests.get(profile_url, params=quote_params, timeout=10)
+                profile_data = profile_response.json()
+                
+                profile = profile_data[0] if profile_data else {}
+                
+                return {
+                    'symbol': symbol,
+                    'name': profile.get('companyName', symbol),
+                    'sector': profile.get('sector', 'Unknown'),
+                    'industry': profile.get('industry', 'Unknown'),
+                    'current_price': quote.get('price', 0),
+                    'dividend_yield': (quote.get('price', 1) / profile.get('lastDiv', 0) * 100) if profile.get('lastDiv') else 0,
+                    'dividend_rate': profile.get('lastDiv', 0),
+                    'payout_ratio': 0,  # Would need additional API call
+                    'pe_ratio': quote.get('pe', 0),
+                    'market_cap': profile.get('mktCap', 0),
+                    'beta': profile.get('beta', 1),
+                    'ex_dividend_date': None,
+                    'dividend_date': None,
+                    'country': profile.get('country', 'Unknown')
+                }
+            
+        except Exception as e:
+            st.warning(f"FMP error for {symbol}: {str(e)}")
+            return None
+        
+        return None
+
+    def manual_data_entry_fallback(self, symbol: str) -> Dict:
+        """Allow manual data entry when APIs fail"""
+        st.warning(f"⚠️ All APIs failed for {symbol}. Using fallback values.")
+        
+        # Return basic structure with default values
+        # In a real implementation, you could show a form for manual entry
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector': self.sector_mapping.get(symbol, 'Unknown'),
+            'industry': 'Unknown',
+            'current_price': 0,  # User would need to enter manually
+            'dividend_yield': 0,
+            'dividend_rate': 0,
+            'payout_ratio': 0,
+            'pe_ratio': 0,
+            'market_cap': 0,
+            'beta': 1,
+            'ex_dividend_date': None,
+            'dividend_date': None,
+            'country': 'Unknown'
+        }
+
+    def fetch_stock_info(self, symbol: str, retry_count: int = 3, use_fallback: bool = True) -> Dict:
+        """Fetch comprehensive stock information with rate limiting and fallback options"""
+        
+        # MANDATORY 1-second delay for Yahoo Finance to avoid rate limiting
+        time.sleep(1.0)
+        
+        # Add additional random delay to avoid hitting rate limits
+        additional_delay = random.uniform(0.2, 0.5)
+        time.sleep(additional_delay)
+        
+        for attempt in range(retry_count):
+            try:
+                stock = yf.Ticker(symbol)
+                info = stock.info
+                
+                # Check if we got valid data
+                if not info or len(info) < 5:
+                    raise Exception("Empty or minimal data returned")
+                
+                # Handle dividend yield properly - yfinance returns it as decimal (0.0152 for 1.52%)
+                dividend_yield_raw = info.get('dividendYield', 0)
+                if dividend_yield_raw:
+                    # If the value is already > 1, it might be in percentage form, don't multiply
+                    dividend_yield = dividend_yield_raw * 100 if dividend_yield_raw < 1 else dividend_yield_raw
+                else:
+                    dividend_yield = 0
+                
+                # Handle payout ratio similarly
+                payout_ratio_raw = info.get('payoutRatio', 0)
+                if payout_ratio_raw:
+                    payout_ratio = payout_ratio_raw * 100 if payout_ratio_raw < 1 else payout_ratio_raw
+                else:
+                    payout_ratio = 0
+                
+                return {
+                    'symbol': symbol,
+                    'name': info.get('longName', symbol),
+                    'sector': info.get('sector', self.sector_mapping.get(symbol, 'Unknown')),
+                    'industry': info.get('industry', 'Unknown'),
+                    'current_price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
+                    'dividend_yield': dividend_yield,
+                    'dividend_rate': info.get('dividendRate', 0),
+                    'payout_ratio': payout_ratio,
+                    'pe_ratio': info.get('forwardPE', info.get('trailingPE', 0)),
+                    'market_cap': info.get('marketCap', 0),
+                    'beta': info.get('beta', 1),
+                    'ex_dividend_date': info.get('exDividendDate'),
+                    'dividend_date': info.get('dividendDate'),
+                    'country': info.get('country', 'Unknown')
+                }
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "rate limit" in error_msg or "too many requests" in error_msg or "403" in error_msg or "blocked" in error_msg:
+                    # Exponential backoff for rate limiting with longer delays
+                    wait_time = 2 + (2 ** attempt) + random.uniform(1, 3)
+                    st.warning(f"⚠️ Yahoo Finance rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.warning(f"Yahoo Finance error for {symbol}: {str(e)}")
+                    break
+        
+        # If all Yahoo Finance attempts failed, try fallback sources
+        if use_fallback:
+            st.info(f"🔄 Trying alternative data sources for {symbol}...")
+            fallback_data = self.fetch_stock_info_fallback(symbol)
+            if fallback_data and fallback_data['current_price'] > 0:
+                return fallback_data
+        
+        # Return default values if all attempts failed
+        st.error(f"❌ All data sources failed for {symbol}. Using default values.")
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector': self.sector_mapping.get(symbol, 'Unknown'),
+            'industry': 'Unknown',
+            'current_price': 0,
+            'dividend_yield': 0,
+            'dividend_rate': 0,
+            'payout_ratio': 0,
+            'pe_ratio': 0,
+            'market_cap': 0,
+            'beta': 1,
+            'ex_dividend_date': None,
+            'dividend_date': None,
+            'country': 'Unknown'
+        }
+
     def clear_session_data(self):
         """Clear all session data"""
         st.session_state.portfolio_holdings = []
         st.session_state.last_analysis_date = None
         st.session_state.portfolio_name = "My Portfolio"
         st.session_state.portfolio_notes = ""
+
+    def fetch_historical_data(self, symbol: str, period: str = "5y") -> pd.DataFrame:
+        """Fetch historical price data"""
+        try:
+            stock = yf.Ticker(symbol)
+            hist = stock.history(period=period)
+            
+            # Get dividend data
+            dividends = stock.dividends
+            
+            # Merge dividends with price data
+            hist['Dividends'] = 0
+            for date, div in dividends.items():
+                if date in hist.index:
+                    hist.loc[date, 'Dividends'] = div
+            
+            return hist
+        except Exception as e:
+            st.error(f"Error fetching historical data for {symbol}: {str(e)}")
+            return pd.DataFrame()
+
+    def calculate_portfolio_metrics(self, portfolio_data: pd.DataFrame) -> Dict:
+        """Calculate comprehensive portfolio metrics including advanced risk measures"""
+        metrics = {}
+        
+        # Current portfolio value
+        total_value = (portfolio_data['shares'] * portfolio_data['current_price']).sum()
+        metrics['total_value'] = total_value
+        
+        # Portfolio weights
+        portfolio_data['weight'] = (portfolio_data['shares'] * portfolio_data['current_price']) / total_value
+        
+        # Annual dividend income
+        annual_dividends = (portfolio_data['shares'] * portfolio_data['dividend_rate']).sum()
+        metrics['annual_dividends'] = annual_dividends
+        
+        # Portfolio dividend yield
+        metrics['portfolio_dividend_yield'] = (annual_dividends / total_value) * 100 if total_value > 0 else 0
+        
+        # Weighted average P/E ratio
+        portfolio_data['pe_weighted'] = portfolio_data['weight'] * portfolio_data['pe_ratio']
+        metrics['weighted_pe'] = portfolio_data['pe_weighted'].sum()
+        
+        # Portfolio beta
+        portfolio_data['beta_weighted'] = portfolio_data['weight'] * portfolio_data['beta']
+        metrics['portfolio_beta'] = portfolio_data['beta_weighted'].sum()
+        
+        # Calculate advanced risk metrics
+        try:
+            # Sharpe Ratio estimation (simplified)
+            # Assuming risk-free rate of 4% and estimated portfolio volatility
+            risk_free_rate = 0.04
+            estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08  # Dividend yield + estimated price appreciation
+            estimated_volatility = metrics['portfolio_beta'] * 0.16  # Market volatility * portfolio beta
+            
+            metrics['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+            
+            # Alpha estimation (simplified)
+            # Alpha = Portfolio Return - (Risk-free Rate + Beta * (Market Return - Risk-free Rate))
+            market_return = 0.10  # Assumed market return
+            metrics['portfolio_alpha'] = estimated_return - (risk_free_rate + metrics['portfolio_beta'] * (market_return - risk_free_rate))
+            
+            # Information Ratio (simplified)
+            metrics['information_ratio'] = metrics['portfolio_alpha'] / (estimated_volatility * 0.5) if estimated_volatility > 0 else 0
+            
+        except Exception as e:
+            # Default values if calculation fails
+            metrics['sharpe_ratio'] = 0
+            metrics['portfolio_alpha'] = 0
+            metrics['information_ratio'] = 0
+        
+        # Sector diversification
+        sector_allocation = portfolio_data.groupby('sector').agg({
+            'weight': 'sum',
+            'shares': lambda x: (portfolio_data.loc[x.index, 'shares'] * 
+                               portfolio_data.loc[x.index, 'current_price']).sum()
+        })
+        metrics['sector_allocation'] = sector_allocation
+        
+        # Top holdings
+        portfolio_data_sorted = portfolio_data.sort_values('weight', ascending=False)
+        metrics['top_holdings'] = portfolio_data_sorted.head(10)
+        
+        return metrics
 
     def calculate_synthesis_metrics(self, portfolio_data: pd.DataFrame, metrics: Dict, historical_performance: pd.DataFrame = None) -> Dict:
         """Calculate synthesis metrics for portfolio optimization"""
@@ -224,314 +650,700 @@ class PortfolioAnalyzer:
         
         return new_holdings
 
-    # [Keep all existing methods from the original class...]
-    # Including: fetch_stock_info, calculate_portfolio_metrics, simulate_historical_performance, etc.
-    # [For brevity, I'm showing the new/modified methods above and indicating the rest should remain]
-
-    def fetch_alpha_vantage_data(self, symbol: str) -> Dict:
-        """Fetch data from Alpha Vantage API"""
-        api_key = st.secrets.get("ALPHA_VANTAGE_API_KEY")
-        if not api_key or api_key == "demo":
-            return None
+    def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 5, batch_size: int = 10, delay: int = 5, show_dividend_details: bool = False) -> pd.DataFrame:
+        """Simulate historical portfolio performance with total return (price + dividends)"""
+        
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=years*365)
+        
+        # Fetch historical data for all holdings
+        all_data = {}
+        total_initial_value = 0
+        successful_fetches = 0
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        batch_info = st.empty()
+        
+        # Process in batches
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(portfolio_holdings) + batch_size - 1) // batch_size
             
+            batch_info.info(f"📈 Fetching historical data - Batch {batch_num}/{total_batches}")
+            
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                shares = holding['shares']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
+                
+                status_text.text(f'Fetching {years}-year historical data for {symbol}...')
+                progress_bar.progress(overall_progress)
+                
+                # Skip if no shares or invalid data
+                if shares <= 0:
+                    continue
+                
+                try:
+                    # MANDATORY 1-second delay for Yahoo Finance + additional random delay
+                    time.sleep(1.0)  # Base delay for Yahoo Finance
+                    time.sleep(random.uniform(0.3, 0.7))  # Additional random delay
+                    
+                    stock = yf.Ticker(symbol)
+                    
+                    # Try to get historical data with multiple attempts
+                    hist = None
+                    for attempt in range(3):
+                        try:
+                            hist = stock.history(start=start_date, end=end_date, auto_adjust=True, back_adjust=True)
+                            if not hist.empty and len(hist) > 10:  # Need at least 10 data points
+                                break
+                            time.sleep(2)  # Wait between attempts
+                        except Exception as e:
+                            if attempt == 2:  # Last attempt
+                                st.warning(f"Failed to fetch historical data for {symbol} after 3 attempts: {str(e)}")
+                            time.sleep(3)  # Longer wait between attempts
+                    
+                    if hist is None or hist.empty:
+                        st.warning(f"No historical data available for {symbol}")
+                        continue
+                    
+                    # Ensure we have enough data
+                    if len(hist) < 10:
+                        st.warning(f"Insufficient historical data for {symbol} ({len(hist)} data points)")
+                        continue
+                    
+                    # Calculate position value over time
+                    hist['Position_Value'] = hist['Close'] * shares
+                    
+                    # Get dividend data and add to historical data with multiple methods
+                    total_dividend_income = 0
+                    dividend_payments_found = 0
+                    
+                    try:
+                        # Method 1: Try to get dividends using the standard method
+                        time.sleep(1.0)  # Rate limiting
+                        
+                        dividends = stock.dividends
+                        hist['Dividend_Income'] = 0
+                        
+                        if len(dividends) > 0:
+                            if show_dividend_details:
+                                st.info(f"📊 Found {len(dividends)} dividend payments for {symbol}")
+                            
+                            # Add dividends received on each date with improved date matching
+                            for div_date, div_amount in dividends.items():
+                                try:
+                                    # Handle timezone issues for dividend dates
+                                    if hasattr(div_date, 'tz') and div_date.tz is not None:
+                                        div_date_normalized = div_date.tz_localize(None)
+                                    else:
+                                        div_date_normalized = div_date
+                                    
+                                    # Convert to date for matching with historical data
+                                    div_date_only = div_date_normalized.date()
+                                    
+                                    # Find matching dates in historical data (allowing for slight date differences)
+                                    hist_dates = [d.date() for d in hist.index]
+                                    
+                                    # Look for exact match first
+                                    if div_date_only in hist_dates:
+                                        match_date = next(d for d in hist.index if d.date() == div_date_only)
+                                        dividend_amount = float(div_amount) * shares
+                                        hist.loc[match_date, 'Dividend_Income'] += dividend_amount
+                                        total_dividend_income += dividend_amount
+                                        dividend_payments_found += 1
+                                    else:
+                                        # Look for closest date within 3 days (handles weekend/holiday shifts)
+                                        closest_date = None
+                                        min_diff = float('inf')
+                                        
+                                        for hist_date in hist.index:
+                                            date_diff = abs((hist_date.date() - div_date_only).days)
+                                            if date_diff <= 3 and date_diff < min_diff:
+                                                min_diff = date_diff
+                                                closest_date = hist_date
+                                        
+                                        if closest_date is not None:
+                                            dividend_amount = float(div_amount) * shares
+                                            hist.loc[closest_date, 'Dividend_Income'] += dividend_amount
+                                            total_dividend_income += dividend_amount
+                                            dividend_payments_found += 1
+                                            
+                                except Exception as div_error:
+                                    if show_dividend_details:
+                                        st.warning(f"Error processing dividend for {symbol} on {div_date}: {str(div_error)}")
+                                    continue
+                        
+                        # Method 2: If no dividends found, try alternative approach using stock info
+                        if total_dividend_income == 0:
+                            try:
+                                time.sleep(0.5)  # Additional rate limiting
+                                info = stock.info
+                                annual_dividend = info.get('dividendRate', 0)
+                                
+                                if annual_dividend > 0:
+                                    if show_dividend_details:
+                                        st.info(f"📈 Using annual dividend rate method for {symbol}: ${annual_dividend}")
+                                    
+                                    # Distribute annual dividend quarterly (most common)
+                                    quarterly_dividend = annual_dividend / 4
+                                    
+                                    # Add quarterly dividends to approximate dates
+                                    for month in [3, 6, 9, 12]:  # March, June, September, December
+                                        for year in range(start_date.year, end_date.year + 1):
+                                            try:
+                                                approx_date = pd.Timestamp(year, month, 15)  # Mid-month
+                                                if approx_date in hist.index:
+                                                    dividend_amount = quarterly_dividend * shares
+                                                    hist.loc[approx_date, 'Dividend_Income'] += dividend_amount
+                                                    total_dividend_income += dividend_amount
+                                                    dividend_payments_found += 1
+                                            except:
+                                                continue
+                                
+                            except Exception as e:
+                                if show_dividend_details:
+                                    st.warning(f"Alternative dividend method failed for {symbol}: {str(e)}")
+                        
+                        if show_dividend_details:
+                            if total_dividend_income > 0:
+                                st.success(f"✅ {symbol}: ${total_dividend_income:.2f} total dividends ({dividend_payments_found} payments)")
+                            else:
+                                st.info(f"ℹ️ No dividend payments found for {symbol}")
+                            
+                    except Exception as e:
+                        if show_dividend_details:
+                            st.warning(f"Could not fetch dividend data for {symbol}: {str(e)}")
+                        hist['Dividend_Income'] = 0
+                    
+                    # Calculate cumulative dividends (total dividends received up to each date)
+                    hist['Cumulative_Dividends'] = hist['Dividend_Income'].cumsum()
+                    
+                    # Calculate total return percentage (capital gains + dividends)
+                    initial_price = hist['Close'].iloc[0]
+                    if initial_price <= 0:
+                        st.warning(f"Invalid initial price for {symbol}: {initial_price}")
+                        continue
+                        
+                    initial_investment = initial_price * shares
+                    
+                    # Total value = current position value + all dividends received
+                    hist['Total_Value'] = hist['Position_Value'] + hist['Cumulative_Dividends']
+                    
+                    # Total return percentage = (total value / initial investment - 1) * 100
+                    hist['Total_Return_Pct'] = ((hist['Total_Value'] / initial_investment) - 1) * 100
+                    
+                    # Price-only return (for comparison)
+                    hist['Price_Return_Pct'] = ((hist['Close'] / initial_price) - 1) * 100
+                    
+                    all_data[symbol] = hist
+                    total_initial_value += initial_investment
+                    successful_fetches += 1
+                    
+                except Exception as e:
+                    st.warning(f"Error processing historical data for {symbol}: {str(e)}")
+                    continue
+            
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                status_text.text(f'Waiting {delay}s before next batch...')
+                time.sleep(delay)
+        
+        progress_bar.empty()
+        status_text.empty()
+        batch_info.empty()
+        
+        # Check if we have enough data
+        if len(all_data) == 0:
+            st.error("❌ No historical data could be fetched for any stocks in your portfolio.")
+            st.info("💡 This could be due to:")
+            st.write("• Rate limiting from Yahoo Finance")
+            st.write("• Invalid stock symbols")
+            st.write("• Network connectivity issues")
+            st.write("• Try using backup APIs or wait before retrying")
+            return pd.DataFrame()
+        
+        if successful_fetches < len(portfolio_holdings) * 0.5:
+            st.warning(f"⚠️ Only {successful_fetches}/{len(portfolio_holdings)} stocks had historical data fetched. Results may be incomplete.")
+        
+        # Combine all positions into portfolio performance
+        portfolio_performance = pd.DataFrame()
+        
+        # Handle timezone issues by normalizing all dates to date-only (no time/timezone)
+        # Convert all stock data indexes to date-only for comparison
+        normalized_data = {}
+        for symbol, data in all_data.items():
+            # Create a copy with date-only index
+            data_copy = data.copy()
+            # Convert timezone-aware datetime to date-only
+            data_copy.index = data_copy.index.normalize().date
+            normalized_data[symbol] = data_copy
+        
+        # Find date coverage for each stock (now using date objects)
+        date_coverage = {}
+        for symbol, data in normalized_data.items():
+            date_coverage[symbol] = set(data.index)
+        
+        # Find dates that exist for at least 70% of stocks
+        all_dates = set()
+        for dates in date_coverage.values():
+            all_dates.update(dates)
+        
+        # Count how many stocks have data for each date
+        date_counts = {}
+        for date in all_dates:
+            count = sum(1 for stock_dates in date_coverage.values() if date in stock_dates)
+            date_counts[date] = count
+        
+        # Use dates where at least 70% of stocks have data
+        min_stocks_required = max(1, int(len(all_data) * 0.7))
+        common_dates = [date for date, count in date_counts.items() if count >= min_stocks_required]
+        common_dates = sorted(common_dates)
+        
+        if len(common_dates) == 0:
+            st.error("❌ No overlapping dates found across stocks.")
+            st.info("💡 This often happens when mixing:")
+            st.write("• US stocks (NYSE/NASDAQ) with European stocks (Paris/Frankfurt)")
+            st.write("• Different market holidays and trading calendars")
+            st.write("• Try analyzing US and European stocks separately")
+            return pd.DataFrame()
+        
+        if len(common_dates) < 50:
+            st.warning(f"⚠️ Limited overlapping dates: {len(common_dates)} trading days")
+            st.info("💡 Consider analyzing markets separately for better data coverage")
+        else:
+            st.info(f"📊 Using {len(common_dates)} trading days with normalized date matching")
+        
+        # Calculate portfolio metrics for each date using normalized data
+        for date in common_dates:
+            portfolio_value = 0
+            total_dividends = 0
+            stocks_with_data = 0
+            
+            for symbol, data in normalized_data.items():
+                # Direct date comparison (no timezone issues)
+                if date in data.index:
+                    portfolio_value += data.loc[date, 'Position_Value']
+                    total_dividends += data.loc[date, 'Cumulative_Dividends']
+                    stocks_with_data += 1
+            
+            # Only include dates where we have data for most stocks
+            if stocks_with_data >= min_stocks_required:
+                # Convert date back to timestamp for portfolio_performance index
+                date_timestamp = pd.Timestamp(date)
+                portfolio_performance.loc[date_timestamp, 'Portfolio_Value'] = portfolio_value
+                portfolio_performance.loc[date_timestamp, 'Total_Dividends'] = total_dividends
+                portfolio_performance.loc[date_timestamp, 'Total_Value'] = portfolio_value + total_dividends
+                portfolio_performance.loc[date_timestamp, 'Stocks_With_Data'] = stocks_with_data
+                
+                # Total return including dividends
+                if total_initial_value > 0:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = ((portfolio_value + total_dividends) / total_initial_value - 1) * 100
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = (portfolio_value / total_initial_value - 1) * 100
+                else:
+                    portfolio_performance.loc[date_timestamp, 'Total_Return'] = 0
+                    portfolio_performance.loc[date_timestamp, 'Price_Only_Return'] = 0
+        
+        # Success message with dividend data summary
+        avg_stocks_per_date = portfolio_performance['Stocks_With_Data'].mean() if not portfolio_performance.empty else 0
+        actual_days = len(portfolio_performance)
+        
+        # Calculate total dividend information
+        total_portfolio_dividends = portfolio_performance['Total_Dividends'].iloc[-1] if not portfolio_performance.empty else 0
+        
+        st.success(f"✅ Historical analysis complete! {successful_fetches} stocks analyzed over {actual_days} trading days (avg {avg_stocks_per_date:.1f} stocks/day)")
+        
+        # Dividend data summary
+        if total_portfolio_dividends > 0:
+            st.info(f"💰 Total dividends captured: ${total_portfolio_dividends:,.2f} over {years} years")
+        else:
+            st.warning("⚠️ No dividend data captured in historical analysis. This could mean:")
+            st.write("• Stocks don't pay dividends (growth stocks)")
+            st.write("• Dividend dates don't align with trading data")
+            st.write("• Rate limiting preventing dividend data fetch")
+            st.write("• Try stocks known for dividends: KO, JNJ, PG, T, VZ")
+        
+        # Add data quality warning for mixed markets
+        if successful_fetches > 5:  # Only for larger portfolios
+            us_stocks = sum(1 for symbol in all_data.keys() if '.' not in symbol)
+            intl_stocks = successful_fetches - us_stocks
+            if us_stocks > 0 and intl_stocks > 0:
+                st.info(f"🌍 Mixed markets detected: {us_stocks} US stocks, {intl_stocks} international stocks. Data coverage: {avg_stocks_per_date:.1f}/{successful_fetches} stocks per day.")
+        
+        return portfolio_performance.sort_index()
+
+    def generate_historical_dividend_calendar(self, portfolio_holdings: List[Dict], batch_size: int = 10, delay: int = 2) -> pd.DataFrame:
+        """Generate historical dividend calendar showing actual payments from last year"""
+        dividend_history = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Get date range for last year
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        
+        # Process in batches for dividend calendar
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
+            
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                shares = holding['shares']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
+                
+                status_text.text(f'Fetching dividend history for {symbol}...')
+                progress_bar.progress(overall_progress)
+                
+                try:
+                    # MANDATORY 1-second delay for Yahoo Finance + additional random delay
+                    time.sleep(1.0)  # Base delay for Yahoo Finance
+                    time.sleep(random.uniform(0.2, 0.5))  # Additional random delay
+                    
+                    stock = yf.Ticker(symbol)
+                    
+                    # Get dividend history for the last year
+                    dividends = stock.dividends
+                    
+                    # Filter dividends from last year and handle timezone issues
+                    if len(dividends) > 0:
+                        # Convert timezone-aware index to timezone-naive for comparison
+                        dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                        
+                        # Filter dividends from the last year
+                        recent_mask = (dividend_dates >= start_date) & (dividend_dates <= end_date)
+                        recent_dividends = dividends[recent_mask]
+                        recent_dividend_dates = dividend_dates[recent_mask]
+                        
+                        # Add each dividend payment to history
+                        for date, dividend_amount in zip(recent_dividend_dates, recent_dividends):
+                            dividend_history.append({
+                                'Date': date.date(),
+                                'Symbol': symbol,
+                                'Company': f"{symbol}",  # We'll get company name from stock info if available
+                                'Dividend_Per_Share': float(dividend_amount),
+                                'Shares_Owned': shares,
+                                'Total_Dividend_Received': float(dividend_amount) * shares,
+                                'Month': date.strftime('%Y-%m'),
+                                'Quarter': f"Q{((date.month-1)//3)+1} {date.year}",
+                                'Day_of_Year': date.timetuple().tm_yday,
+                                'Weekday': date.strftime('%A')
+                            })
+                
+                except Exception as e:
+                    st.warning(f"Could not fetch dividend history for {symbol}: {str(e)}")
+            
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                time.sleep(delay)
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if dividend_history:
+            df = pd.DataFrame(dividend_history)
+            
+            # Sort by date
+            df = df.sort_values('Date')
+            
+            # Create daily aggregation for plotting
+            daily_dividends = df.groupby('Date').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: ', '.join(x.unique()),
+                'Dividend_Per_Share': 'sum'  # This isn't quite right but gives a sense of magnitude
+            }).reset_index()
+            daily_dividends.rename(columns={'Symbol': 'Companies'}, inplace=True)
+            
+            # Create monthly aggregation
+            monthly_dividends = df.groupby('Month').agg({
+                'Total_Dividend_Received': 'sum',
+                'Symbol': lambda x: len(x.unique()),
+                'Dividend_Per_Share': 'count'
+            }).reset_index()
+            monthly_dividends.rename(columns={
+                'Symbol': 'Companies_Count',
+                'Dividend_Per_Share': 'Payment_Count'
+            }, inplace=True)
+            
+            return df, daily_dividends, monthly_dividends
+        else:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    def analyze_portfolio_with_ai(self, portfolio_data: pd.DataFrame, metrics: Dict) -> str:
+        """Generate AI-powered portfolio analysis"""
+        
+        if not self.openai_api_key:
+            return self._generate_rule_based_analysis(portfolio_data, metrics)
+        
         try:
-            # Get quote data
-            quote_url = f"https://www.alphavantage.co/query"
-            quote_params = {
-                'function': 'GLOBAL_QUOTE',
-                'symbol': symbol,
-                'apikey': api_key
+            # Prepare portfolio summary for AI
+            portfolio_summary = {
+                'total_value': metrics['total_value'],
+                'dividend_yield': metrics['portfolio_dividend_yield'],
+                'beta': metrics['portfolio_beta'],
+                'pe_ratio': metrics['weighted_pe'],
+                'annual_dividends': metrics['annual_dividends'],
+                'holdings_count': len(portfolio_data),
+                'top_holdings': metrics['top_holdings'][['symbol', 'weight', 'sector']].head(5).to_dict('records'),
+                'sector_allocation': metrics['sector_allocation']['weight'].to_dict()
             }
             
-            response = requests.get(quote_url, params=quote_params, timeout=10)
-            data = response.json()
+            # Create prompt for OpenAI
+            prompt = f"""
+            As a professional financial advisor, analyze this investment portfolio and provide insights:
             
-            if 'Global Quote' in data:
-                quote = data['Global Quote']
-                current_price = float(quote.get('05. price', 0))
-                
-                # Get basic company overview
-                overview_params = {
-                    'function': 'OVERVIEW',
-                    'symbol': symbol,
-                    'apikey': api_key
-                }
-                
-                overview_response = requests.get(quote_url, params=overview_params, timeout=10)
-                overview_data = overview_response.json()
-                
-                return {
-                    'symbol': symbol,
-                    'name': overview_data.get('Name', symbol),
-                    'sector': overview_data.get('Sector', 'Unknown'),
-                    'industry': overview_data.get('Industry', 'Unknown'),
-                    'current_price': current_price,
-                    'dividend_yield': float(overview_data.get('DividendYield', 0)) * 100 if overview_data.get('DividendYield') else 0,
-                    'dividend_rate': float(overview_data.get('DividendPerShare', 0)),
-                    'payout_ratio': 0,  # Not available in Alpha Vantage
-                    'pe_ratio': float(overview_data.get('PERatio', 0)),
-                    'market_cap': int(overview_data.get('MarketCapitalization', 0)),
-                    'beta': float(overview_data.get('Beta', 1)),
-                    'ex_dividend_date': overview_data.get('ExDividendDate'),
-                    'dividend_date': None,
-                    'country': overview_data.get('Country', 'Unknown')
-                }
+            Portfolio Summary:
+            - Total Value: ${metrics['total_value']:,.2f}
+            - Portfolio Dividend Yield: {metrics['portfolio_dividend_yield']:.2f}%
+            - Annual Dividend Income: ${metrics['annual_dividends']:,.2f}
+            - Portfolio Beta: {metrics['portfolio_beta']:.2f}
+            - Weighted P/E Ratio: {metrics['weighted_pe']:.2f}
+            - Number of Holdings: {len(portfolio_data)}
+            
+            Top Holdings: {portfolio_summary['top_holdings']}
+            
+            Sector Allocation: {portfolio_summary['sector_allocation']}
+            
+            Please provide:
+            1. Overall portfolio assessment (strengths and weaknesses)
+            2. Diversification analysis
+            3. Risk assessment
+            4. Dividend sustainability analysis
+            5. Specific recommendations for improvement
+            6. Potential red flags or concerns
+            
+            Keep the analysis concise but comprehensive, suitable for an investor review.
+            """
+            
+            # Note: In a real implementation, you would call OpenAI API here
+            # For this demo, we'll use the rule-based analysis
+            return self._generate_rule_based_analysis(portfolio_data, metrics)
             
         except Exception as e:
-            st.warning(f"Alpha Vantage error for {symbol}: {str(e)}")
-            return None
-        
-        return None
+            st.warning(f"AI analysis unavailable: {str(e)}")
+            return self._generate_rule_based_analysis(portfolio_data, metrics)
 
-    def fetch_fmp_data(self, symbol: str) -> Dict:
-        """Fetch data from Financial Modeling Prep API"""
-        api_key = st.secrets.get("FMP_API_KEY")
-        if not api_key or api_key == "demo":
-            return None
+    def _generate_rule_based_analysis(self, portfolio_data: pd.DataFrame, metrics: Dict) -> str:
+        """Generate rule-based portfolio analysis with problem identification"""
+        
+        analysis = []
+        
+        # Identify problematic stocks first
+        analysis.append("## 🚨 Portfolio Health Check")
+        
+        problem_stocks = []
+        warning_stocks = []
+        
+        for _, stock in portfolio_data.iterrows():
+            issues = []
+            warnings = []
             
-        try:
-            # Get quote data
-            quote_url = f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
-            quote_params = {'apikey': api_key}
+            # Check for data quality issues
+            if stock['current_price'] <= 0:
+                issues.append("No current price data")
             
-            response = requests.get(quote_url, params=quote_params, timeout=10)
-            data = response.json()
+            if stock['dividend_yield'] == 0 and stock['dividend_rate'] == 0:
+                warnings.append("No dividend payments")
             
-            if data and len(data) > 0:
-                quote = data[0]
-                
-                # Get profile data
-                profile_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}"
-                profile_response = requests.get(profile_url, params=quote_params, timeout=10)
-                profile_data = profile_response.json()
-                
-                profile = profile_data[0] if profile_data else {}
-                
-                return {
-                    'symbol': symbol,
-                    'name': profile.get('companyName', symbol),
-                    'sector': profile.get('sector', 'Unknown'),
-                    'industry': profile.get('industry', 'Unknown'),
-                    'current_price': quote.get('price', 0),
-                    'dividend_yield': (quote.get('price', 1) / profile.get('lastDiv', 0) * 100) if profile.get('lastDiv') else 0,
-                    'dividend_rate': profile.get('lastDiv', 0),
-                    'payout_ratio': 0,  # Would need additional API call
-                    'pe_ratio': quote.get('pe', 0),
-                    'market_cap': profile.get('mktCap', 0),
-                    'beta': profile.get('beta', 1),
-                    'ex_dividend_date': None,
-                    'dividend_date': None,
-                    'country': profile.get('country', 'Unknown')
-                }
+            if stock['payout_ratio'] > 100:
+                issues.append(f"Unsustainable payout ratio ({stock['payout_ratio']:.1f}%)")
+            elif stock['payout_ratio'] > 90:
+                warnings.append(f"High payout ratio ({stock['payout_ratio']:.1f}%)")
             
-        except Exception as e:
-            st.warning(f"FMP error for {symbol}: {str(e)}")
-            return None
-        
-        return None
-
-    def manual_data_entry_fallback(self, symbol: str) -> Dict:
-        """Allow manual data entry when APIs fail"""
-        st.warning(f"⚠️ All APIs failed for {symbol}. Using fallback values.")
-        
-        # Return basic structure with default values
-        return {
-            'symbol': symbol,
-            'name': symbol,
-            'sector': self.sector_mapping.get(symbol, 'Unknown'),
-            'industry': 'Unknown',
-            'current_price': 0,  # User would need to enter manually
-            'dividend_yield': 0,
-            'dividend_rate': 0,
-            'payout_ratio': 0,
-            'pe_ratio': 0,
-            'market_cap': 0,
-            'beta': 1,
-            'ex_dividend_date': None,
-            'dividend_date': None,
-            'country': 'Unknown'
-        }
-
-    def fetch_stock_info_fallback(self, symbol: str) -> Dict:
-        """Fallback method using alternative data sources when Yahoo Finance is blocked"""
-        
-        # Try Alpha Vantage if API key is available
-        if hasattr(st.secrets, "ALPHA_VANTAGE_API_KEY") and st.secrets.ALPHA_VANTAGE_API_KEY != "demo":
-            try:
-                av_data = self.fetch_alpha_vantage_data(symbol)
-                if av_data and av_data['current_price'] > 0:
-                    return av_data
-            except Exception as e:
-                st.warning(f"Alpha Vantage fallback failed for {symbol}: {str(e)}")
-        
-        # Try Financial Modeling Prep if API key is available  
-        if hasattr(st.secrets, "FMP_API_KEY") and st.secrets.FMP_API_KEY != "demo":
-            try:
-                fmp_data = self.fetch_fmp_data(symbol)
-                if fmp_data and fmp_data['current_price'] > 0:
-                    return fmp_data
-            except Exception as e:
-                st.warning(f"FMP fallback failed for {symbol}: {str(e)}")
-        
-        # Manual data entry fallback
-        return self.manual_data_entry_fallback(symbol)
-
-    def fetch_stock_info(self, symbol: str, retry_count: int = 3, use_fallback: bool = True) -> Dict:
-        """Fetch comprehensive stock information with rate limiting and fallback options"""
-        
-        # MANDATORY 1-second delay for Yahoo Finance to avoid rate limiting
-        time.sleep(1.0)
-        
-        # Add additional random delay to avoid hitting rate limits
-        additional_delay = random.uniform(0.2, 0.5)
-        time.sleep(additional_delay)
-        
-        for attempt in range(retry_count):
-            try:
-                stock = yf.Ticker(symbol)
-                info = stock.info
-                
-                # Check if we got valid data
-                if not info or len(info) < 5:
-                    raise Exception("Empty or minimal data returned")
-                
-                # Handle dividend yield properly - yfinance returns it as decimal (0.0152 for 1.52%)
-                dividend_yield_raw = info.get('dividendYield', 0)
-                if dividend_yield_raw:
-                    # If the value is already > 1, it might be in percentage form, don't multiply
-                    dividend_yield = dividend_yield_raw * 100 if dividend_yield_raw < 1 else dividend_yield_raw
-                else:
-                    dividend_yield = 0
-                
-                # Handle payout ratio similarly
-                payout_ratio_raw = info.get('payoutRatio', 0)
-                if payout_ratio_raw:
-                    payout_ratio = payout_ratio_raw * 100 if payout_ratio_raw < 1 else payout_ratio_raw
-                else:
-                    payout_ratio = 0
-                
-                return {
-                    'symbol': symbol,
-                    'name': info.get('longName', symbol),
-                    'sector': info.get('sector', self.sector_mapping.get(symbol, 'Unknown')),
-                    'industry': info.get('industry', 'Unknown'),
-                    'current_price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
-                    'dividend_yield': dividend_yield,
-                    'dividend_rate': info.get('dividendRate', 0),
-                    'payout_ratio': payout_ratio,
-                    'pe_ratio': info.get('forwardPE', info.get('trailingPE', 0)),
-                    'market_cap': info.get('marketCap', 0),
-                    'beta': info.get('beta', 1),
-                    'ex_dividend_date': info.get('exDividendDate'),
-                    'dividend_date': info.get('dividendDate'),
-                    'country': info.get('country', 'Unknown')
-                }
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "rate limit" in error_msg or "too many requests" in error_msg or "403" in error_msg or "blocked" in error_msg:
-                    # Exponential backoff for rate limiting with longer delays
-                    wait_time = 2 + (2 ** attempt) + random.uniform(1, 3)
-                    st.warning(f"⚠️ Yahoo Finance rate limited for {symbol}. Waiting {wait_time:.1f}s before retry {attempt + 1}/{retry_count}...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    st.warning(f"Yahoo Finance error for {symbol}: {str(e)}")
-                    break
-        
-        # If all Yahoo Finance attempts failed, try fallback sources
-        if use_fallback:
-            st.info(f"🔄 Trying alternative data sources for {symbol}...")
-            fallback_data = self.fetch_stock_info_fallback(symbol)
-            if fallback_data and fallback_data['current_price'] > 0:
-                return fallback_data
-        
-        # Return default values if all attempts failed
-        st.error(f"❌ All data sources failed for {symbol}. Using default values.")
-        return {
-            'symbol': symbol,
-            'name': symbol,
-            'sector': self.sector_mapping.get(symbol, 'Unknown'),
-            'industry': 'Unknown',
-            'current_price': 0,
-            'dividend_yield': 0,
-            'dividend_rate': 0,
-            'payout_ratio': 0,
-            'pe_ratio': 0,
-            'market_cap': 0,
-            'beta': 1,
-            'ex_dividend_date': None,
-            'dividend_date': None,
-            'country': 'Unknown'
-        }
-
-    def calculate_portfolio_metrics(self, portfolio_data: pd.DataFrame) -> Dict:
-        """Calculate comprehensive portfolio metrics including advanced risk measures"""
-        metrics = {}
-        
-        # Current portfolio value
-        total_value = (portfolio_data['shares'] * portfolio_data['current_price']).sum()
-        metrics['total_value'] = total_value
-        
-        # Portfolio weights
-        portfolio_data['weight'] = (portfolio_data['shares'] * portfolio_data['current_price']) / total_value
-        
-        # Annual dividend income
-        annual_dividends = (portfolio_data['shares'] * portfolio_data['dividend_rate']).sum()
-        metrics['annual_dividends'] = annual_dividends
-        
-        # Portfolio dividend yield
-        metrics['portfolio_dividend_yield'] = (annual_dividends / total_value) * 100 if total_value > 0 else 0
-        
-        # Weighted average P/E ratio
-        portfolio_data['pe_weighted'] = portfolio_data['weight'] * portfolio_data['pe_ratio']
-        metrics['weighted_pe'] = portfolio_data['pe_weighted'].sum()
-        
-        # Portfolio beta
-        portfolio_data['beta_weighted'] = portfolio_data['weight'] * portfolio_data['beta']
-        metrics['portfolio_beta'] = portfolio_data['beta_weighted'].sum()
-        
-        # Calculate advanced risk metrics
-        try:
-            # Sharpe Ratio estimation (simplified)
-            # Assuming risk-free rate of 4% and estimated portfolio volatility
-            risk_free_rate = 0.04
-            estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08  # Dividend yield + estimated price appreciation
-            estimated_volatility = metrics['portfolio_beta'] * 0.16  # Market volatility * portfolio beta
+            if stock['pe_ratio'] > 50:
+                warnings.append(f"Very high P/E ratio ({stock['pe_ratio']:.1f})")
+            elif stock['pe_ratio'] <= 0:
+                warnings.append("No P/E ratio available")
             
-            metrics['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+            if stock['beta'] > 2.0:
+                warnings.append(f"Very high volatility (Beta {stock['beta']:.2f})")
             
-            # Alpha estimation (simplified)
-            # Alpha = Portfolio Return - (Risk-free Rate + Beta * (Market Return - Risk-free Rate))
-            market_return = 0.10  # Assumed market return
-            metrics['portfolio_alpha'] = estimated_return - (risk_free_rate + metrics['portfolio_beta'] * (market_return - risk_free_rate))
+            if stock['sector'] == 'Unknown':
+                warnings.append("Unknown sector classification")
             
-            # Information Ratio (simplified)
-            metrics['information_ratio'] = metrics['portfolio_alpha'] / (estimated_volatility * 0.5) if estimated_volatility > 0 else 0
+            # Check for concentration risk
+            weight = stock['shares'] * stock['current_price'] / metrics['total_value'] * 100
+            if weight > 25:
+                warnings.append(f"High concentration ({weight:.1f}% of portfolio)")
             
-        except Exception as e:
-            # Default values if calculation fails
-            metrics['sharpe_ratio'] = 0
-            metrics['portfolio_alpha'] = 0
-            metrics['information_ratio'] = 0
+            if issues:
+                problem_stocks.append(f"🔴 **{stock['symbol']}**: {', '.join(issues)}")
+            elif warnings:
+                warning_stocks.append(f"🟡 **{stock['symbol']}**: {', '.join(warnings)}")
         
-        # Sector diversification
-        sector_allocation = portfolio_data.groupby('sector').agg({
-            'weight': 'sum',
-            'shares': lambda x: (portfolio_data.loc[x.index, 'shares'] * 
-                               portfolio_data.loc[x.index, 'current_price']).sum()
-        })
-        metrics['sector_allocation'] = sector_allocation
+        if problem_stocks:
+            analysis.append("### 🔴 Stocks with Issues:")
+            analysis.extend(problem_stocks)
+            analysis.append("")
         
-        # Top holdings
-        portfolio_data_sorted = portfolio_data.sort_values('weight', ascending=False)
-        metrics['top_holdings'] = portfolio_data_sorted.head(10)
+        if warning_stocks:
+            analysis.append("### 🟡 Stocks to Monitor:")
+            analysis.extend(warning_stocks[:5])  # Show top 5 warnings
+            if len(warning_stocks) > 5:
+                analysis.append(f"... and {len(warning_stocks) - 5} more")
+            analysis.append("")
         
-        return metrics
+        if not problem_stocks and not warning_stocks:
+            analysis.append("✅ **No major issues detected** - portfolio looks healthy!")
+            analysis.append("")
+        
+        # Market mix analysis
+        us_stocks = portfolio_data[~portfolio_data['symbol'].str.contains('\\.', na=False)]
+        intl_stocks = portfolio_data[portfolio_data['symbol'].str.contains('\\.', na=False)]
+        
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            analysis.append("### 🌍 Mixed Market Detection:")
+            analysis.append(f"• **US Stocks**: {len(us_stocks)} ({len(us_stocks)/len(portfolio_data)*100:.1f}%)")
+            analysis.append(f"• **International**: {len(intl_stocks)} ({len(intl_stocks)/len(portfolio_data)*100:.1f}%)")
+            analysis.append("• **Note**: Mixed markets may have limited historical data overlap")
+            analysis.append("")
+        
+        # Overall Assessment
+        analysis.append("## 📊 Overall Portfolio Assessment")
+        
+        total_value = metrics['total_value']
+        dividend_yield = metrics['portfolio_dividend_yield']
+        beta = metrics['portfolio_beta']
+        
+        if dividend_yield > 4:
+            analysis.append(f"✅ **Strong Dividend Income**: Your portfolio yields {dividend_yield:.2f}%, providing solid passive income.")
+        elif dividend_yield > 2:
+            analysis.append(f"⚡ **Moderate Dividend Income**: Your portfolio yields {dividend_yield:.2f}%, which is reasonable for income generation.")
+        else:
+            analysis.append(f"⚠️ **Low Dividend Yield**: At {dividend_yield:.2f}%, your portfolio may not provide sufficient income for dividend investors.")
+        
+        # Risk Assessment
+        analysis.append("\n## ⚠️ Risk Assessment")
+        
+        if beta < 0.8:
+            analysis.append(f"🛡️ **Low Risk Profile**: Portfolio beta of {beta:.2f} suggests lower volatility than the market.")
+        elif beta > 1.2:
+            analysis.append(f"📈 **High Risk Profile**: Portfolio beta of {beta:.2f} indicates higher volatility than the market.")
+        else:
+            analysis.append(f"⚖️ **Moderate Risk Profile**: Portfolio beta of {beta:.2f} is close to market volatility.")
+        
+        # Diversification Analysis
+        analysis.append("\n## 🎯 Diversification Analysis")
+        
+        sector_allocation = metrics['sector_allocation']
+        num_sectors = len(sector_allocation)
+        max_sector_weight = sector_allocation['weight'].max()
+        
+        if num_sectors >= 6:
+            analysis.append(f"✅ **Good Sector Diversification**: Portfolio spans {num_sectors} sectors.")
+        elif num_sectors >= 3:
+            analysis.append(f"⚡ **Moderate Diversification**: Portfolio covers {num_sectors} sectors - consider adding more.")
+        else:
+            analysis.append(f"⚠️ **Poor Diversification**: Only {num_sectors} sectors represented - high concentration risk.")
+        
+        if max_sector_weight > 0.4:
+            max_sector = sector_allocation['weight'].idxmax()
+            analysis.append(f"⚠️ **Sector Concentration Risk**: {max_sector} represents {max_sector_weight*100:.1f}% of portfolio.")
+        
+        # Top Holdings Analysis
+        analysis.append("\n## 🏆 Top Holdings Analysis")
+        
+        top_holdings = metrics['top_holdings']
+        largest_position = top_holdings['weight'].iloc[0]
+        
+        if largest_position > 0.15:
+            analysis.append(f"⚠️ **Position Concentration**: Largest holding ({top_holdings['symbol'].iloc[0]}) represents {largest_position*100:.1f}% of portfolio.")
+        
+        top_5_weight = top_holdings['weight'].head(5).sum()
+        analysis.append(f"📈 **Top 5 Holdings**: Represent {top_5_weight*100:.1f}% of total portfolio value.")
+        
+        # Dividend Sustainability
+        analysis.append("\n## 💰 Dividend Sustainability")
+        
+        # Filter out stocks with no payout ratio data
+        valid_payout_ratios = portfolio_data[portfolio_data['payout_ratio'] > 0]['payout_ratio']
+        if len(valid_payout_ratios) > 0:
+            avg_payout_ratio = valid_payout_ratios.mean()
+            if avg_payout_ratio > 80:
+                analysis.append(f"⚠️ **High Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% may indicate dividend sustainability risks.")
+            elif avg_payout_ratio > 60:
+                analysis.append(f"⚡ **Moderate Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% is reasonable but worth monitoring.")
+            else:
+                analysis.append(f"✅ **Conservative Payout Ratios**: Average payout ratio of {avg_payout_ratio:.1f}% suggests sustainable dividends.")
+        else:
+            analysis.append("ℹ️ **Limited Payout Data**: Unable to assess dividend sustainability - consider adding dividend-paying stocks.")
+        
+        # Recommendations
+        analysis.append("\n## 🎯 Specific Recommendations")
+        
+        recommendations = []
+        
+        # Address identified problems first
+        if problem_stocks:
+            recommendations.append(f"• **🔴 Priority**: Address {len(problem_stocks)} stocks with data/fundamental issues")
+        
+        if warning_stocks:
+            recommendations.append(f"• **🟡 Monitor**: Keep close watch on {len(warning_stocks)} stocks with potential concerns")
+        
+        # Geographic diversification
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            recommendations.append("• **🌍 Mixed Markets**: Consider analyzing US and international holdings separately for better insights")
+        
+        # Standard recommendations
+        if num_sectors < 5:
+            recommendations.append("• **🎯 Diversification**: Add positions in underrepresented sectors")
+        
+        if max_sector_weight > 0.4:
+            recommendations.append("• **⚖️ Rebalancing**: Reduce overweight sector positions")
+        
+        if largest_position > 0.15:
+            recommendations.append("• **📊 Position Size**: Consider reducing largest individual positions")
+        
+        if dividend_yield < 3:
+            recommendations.append("• **💰 Income**: Add higher-yielding dividend stocks for better income generation")
+        
+        if len(valid_payout_ratios) > 0 and valid_payout_ratios.mean() > 70:
+            recommendations.append("• **🔍 Sustainability**: Review high payout ratio companies for dividend safety")
+        
+        if beta > 1.3:
+            recommendations.append("• **🛡️ Risk**: Add defensive stocks to reduce overall portfolio volatility")
+        
+        # Data quality recommendations
+        stocks_with_missing_data = sum(1 for _, stock in portfolio_data.iterrows() if stock['current_price'] <= 0)
+        if stocks_with_missing_data > 0:
+            recommendations.append("• **📊 Data Quality**: Verify symbols and consider alternative data sources for problematic stocks")
+        
+        if len(recommendations) == 0:
+            recommendations.append("• **✅ Well-Balanced**: Portfolio shows good balance - continue monitoring and periodic rebalancing")
+        
+        analysis.extend(recommendations)
+        
+        # Summary score
+        analysis.append("\n## 📋 Portfolio Health Score")
+        
+        score = 100
+        score -= len(problem_stocks) * 15  # -15 for each major issue
+        score -= len(warning_stocks) * 5   # -5 for each warning
+        score -= max(0, (largest_position - 0.15) * 100)  # Concentration penalty
+        score -= max(0, (8 - num_sectors) * 5)  # Diversification penalty
+        score = max(0, min(100, score))
+        
+        if score >= 80:
+            score_emoji = "🟢"
+            score_text = "Excellent"
+        elif score >= 60:
+            score_emoji = "🟡"
+            score_text = "Good"
+        else:
+            score_emoji = "🔴"
+            score_text = "Needs Attention"
+        
+        analysis.append(f"{score_emoji} **Overall Score: {score:.0f}/100 ({score_text})**")
+        
+        return "\n".join(analysis)
 
 def main():
     st.title("🎯 Portfolio Optimizer & Analyzer")
-    st.markdown("**Intelligent portfolio optimization with synthesis metrics and proportional allocation**")
+    st.markdown("**Comprehensive portfolio analysis with AI-powered insights and optimization tools**")
     
     analyzer = PortfolioAnalyzer()
     
@@ -546,7 +1358,7 @@ def main():
         if st.session_state.portfolio_holdings:
             st.sidebar.success(f"💼 Saved portfolio: {len(st.session_state.portfolio_holdings)} holdings")
     
-    # Optimization mode toggle
+    # NEW: Optimization mode toggle
     st.session_state.optimization_mode = st.sidebar.checkbox(
         "🎯 Optimization Mode", 
         value=st.session_state.optimization_mode,
@@ -559,7 +1371,7 @@ def main():
         ["📝 Create/Edit Portfolio", "📂 Load Saved Portfolio", "📁 Import Portfolio File", "🗑️ Clear Session"]
     )
     
-    portfolio_holdings = []  # Initialize portfolio_holdings
+    portfolio_holdings = []
     
     if portfolio_action == "🗑️ Clear Session":
         if st.sidebar.button("🗑️ Clear All Data", type="secondary"):
@@ -581,12 +1393,50 @@ def main():
             
             if st.sidebar.button("✅ Use Saved Portfolio", type="primary"):
                 portfolio_holdings = saved_holdings
-                st.session_state.holdings = saved_holdings  # Also update holdings
                 st.sidebar.success("Loaded saved portfolio!")
         else:
             st.sidebar.info("No saved portfolio found. Create one first!")
     
-    elif portfolio_action == "📝 Create/Edit Portfolio":
+    elif portfolio_action == "📁 Import Portfolio File":
+        st.sidebar.subheader("📁 Import Portfolio")
+        
+        # File upload options
+        upload_format = st.sidebar.radio(
+            "File Format:",
+            ["CSV Format", "JSON Format (Full Backup)"]
+        )
+        
+        uploaded_file = st.sidebar.file_uploader(
+            f"Choose {upload_format.split()[0]} file",
+            type=["csv"] if "CSV" in upload_format else ["json"],
+            help="Upload your portfolio file to restore previous analysis"
+        )
+        
+        if uploaded_file:
+            try:
+                file_content = uploaded_file.read().decode('utf-8')
+                
+                if upload_format == "CSV Format":
+                    imported_holdings = analyzer.import_portfolio_from_csv(file_content)
+                    portfolio_holdings = imported_holdings
+                    st.sidebar.success(f"✅ Imported {len(imported_holdings)} holdings from CSV")
+                    
+                else:  # JSON Format
+                    imported_holdings, metadata = analyzer.import_portfolio_from_json(file_content)
+                    portfolio_holdings = imported_holdings
+                    
+                    # Update session with imported metadata
+                    st.session_state.portfolio_name = metadata['name']
+                    st.session_state.portfolio_notes = metadata['notes']
+                    
+                    st.sidebar.success(f"✅ Imported portfolio: {metadata['name']}")
+                    if metadata['created_date']:
+                        st.sidebar.info(f"Created: {metadata['created_date'][:10]}")
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Import failed: {str(e)}")
+    
+    else:  # Create/Edit Portfolio
         st.sidebar.header("📝 Portfolio Input")
         
         # Portfolio metadata
@@ -609,10 +1459,11 @@ def main():
         # Portfolio input methods
         input_method = st.sidebar.radio(
             "Choose input method:",
-            ["Smart Entry", "Manual Entry", "Upload CSV", "Sample Portfolio"]
+            ["Smart Entry", "Manual Entry", "Upload CSV", "Sample Portfolio"] if st.session_state.optimization_mode else ["Manual Entry", "Upload CSV", "Sample Portfolio"]
         )
         
-        if input_method == "Smart Entry":
+        # NEW: Smart Entry mode for optimization
+        if input_method == "Smart Entry" and st.session_state.optimization_mode:
             st.sidebar.subheader("🎯 Smart Portfolio Entry")
             st.sidebar.info("💡 Add stocks with automatic proportional allocation")
             
@@ -698,6 +1549,8 @@ def main():
                         st.sidebar.write(f"• {holding['symbol']}: {weight:.1f}% target")
                     else:
                         st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
+            
+            portfolio_holdings = st.session_state.holdings
         
         elif input_method == "Manual Entry":
             st.sidebar.subheader("Add Holdings")
@@ -729,11 +1582,128 @@ def main():
                             st.session_state.holdings.append({'symbol': symbol, 'shares': shares})
                             st.success(f"Added {shares} shares of {symbol}")
             
-            # Display current holdings
+            # Display and manage current holdings with editing capabilities
             if st.session_state.holdings:
-                st.sidebar.subheader("📋 Current Holdings")
-                for holding in st.session_state.holdings:
-                    st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
+                st.sidebar.subheader("📝 Edit Current Holdings")
+                
+                # Add portfolio editing interface
+                edit_mode = st.sidebar.checkbox("✏️ Edit Mode", help="Enable editing of existing holdings")
+                
+                if edit_mode:
+                    st.sidebar.write("**Click to remove or edit holdings:**")
+                    
+                    # Create a list to track holdings to remove
+                    holdings_to_remove = []
+                    holdings_to_update = []
+                    
+                    for i, holding in enumerate(st.session_state.holdings):
+                        col1, col2, col3 = st.sidebar.columns([2, 1, 1])
+                        
+                        with col1:
+                            st.write(f"{holding['symbol']}")
+                        
+                        with col2:
+                            # Editable shares input
+                            new_shares = st.number_input(
+                                "Shares", 
+                                min_value=0.0, 
+                                value=float(holding['shares']), 
+                                step=1.0,
+                                key=f"edit_shares_{i}",
+                                label_visibility="collapsed"
+                            )
+                            if new_shares != holding['shares']:
+                                holdings_to_update.append((i, new_shares))
+                        
+                        with col3:
+                            if st.button("🗑️", key=f"remove_{i}", help=f"Remove {holding['symbol']}"):
+                                holdings_to_remove.append(i)
+                    
+                    # Apply updates
+                    if holdings_to_update:
+                        for i, new_shares in holdings_to_update:
+                            if new_shares > 0:
+                                st.session_state.holdings[i]['shares'] = new_shares
+                                st.sidebar.success(f"Updated {st.session_state.holdings[i]['symbol']}")
+                            else:
+                                holdings_to_remove.append(i)
+                    
+                    # Remove holdings (process in reverse order to maintain indices)
+                    for i in sorted(holdings_to_remove, reverse=True):
+                        removed_symbol = st.session_state.holdings[i]['symbol']
+                        st.session_state.holdings.pop(i)
+                        st.sidebar.success(f"Removed {removed_symbol}")
+                        st.rerun()
+                    
+                    # Bulk operations
+                    st.sidebar.write("**Bulk Operations:**")
+                    col1, col2 = st.sidebar.columns(2)
+                    
+                    with col1:
+                        if st.button("🗑️ Clear All", help="Remove all holdings"):
+                            st.session_state.holdings = []
+                            st.sidebar.success("Portfolio cleared!")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("📋 Duplicate", help="Duplicate current portfolio"):
+                            # Add "_copy" to each symbol
+                            duplicated = []
+                            for holding in st.session_state.holdings:
+                                duplicated.append({
+                                    'symbol': holding['symbol'],
+                                    'shares': holding['shares']
+                                })
+                            st.session_state.holdings.extend(duplicated)
+                            st.sidebar.success("Portfolio duplicated!")
+                            st.rerun()
+                
+                else:
+                    # Regular view mode
+                    st.sidebar.write("**Current Holdings:**")
+                    total_positions = 0
+                    for holding in st.session_state.holdings:
+                        st.sidebar.write(f"• {holding['symbol']}: {holding['shares']} shares")
+                        total_positions += holding['shares']
+                    
+                    st.sidebar.info(f"📊 Total: {len(st.session_state.holdings)} stocks, {total_positions} shares")
+                
+                # Quick add popular stocks
+                st.sidebar.subheader("🚀 Quick Add")
+                popular_stocks = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'JNJ', 'PG', 'KO', 'XOM', 'VZ']
+                selected_stock = st.sidebar.selectbox("Popular Stocks", [''] + popular_stocks)
+                quick_shares = st.sidebar.number_input("Shares", min_value=1, value=10, key="quick_shares")
+                
+                if st.sidebar.button("➕ Quick Add") and selected_stock:
+                    # Check if stock already exists
+                    existing_index = None
+                    for i, holding in enumerate(st.session_state.holdings):
+                        if holding['symbol'] == selected_stock:
+                            existing_index = i
+                            break
+                    
+                    if existing_index is not None:
+                        # Update existing holding
+                        st.session_state.holdings[existing_index]['shares'] += quick_shares
+                        st.sidebar.success(f"Added {quick_shares} more shares to {selected_stock}")
+                    else:
+                        # Add new holding
+                        st.session_state.holdings.append({'symbol': selected_stock, 'shares': quick_shares})
+                        st.sidebar.success(f"Added {quick_shares} shares of {selected_stock}")
+                
+                # Save to session button
+                if st.sidebar.button("💾 Save Portfolio", type="primary"):
+                    analyzer.save_portfolio_to_session(
+                        st.session_state.holdings, 
+                        portfolio_name, 
+                        portfolio_notes
+                    )
+                    st.sidebar.success("Portfolio saved to session!")
+            
+            else:
+                st.sidebar.info("No holdings added yet. Use the form above to add stocks.")
+            
+            portfolio_holdings = st.session_state.holdings
         
         elif input_method == "Upload CSV":
             st.sidebar.subheader("Upload Portfolio CSV")
@@ -745,31 +1715,77 @@ def main():
             
             if uploaded_file:
                 try:
-                    df = pd.read_csv(uploaded_file)
+                    csv_content = uploaded_file.read().decode('utf-8')
+                    imported_holdings = analyzer.import_portfolio_from_csv(csv_content)
                     
-                    # Check required columns
-                    if 'symbol' not in df.columns:
-                        st.sidebar.error("CSV must contain 'symbol' column")
-                    elif 'shares' not in df.columns:
-                        st.sidebar.error("CSV must contain 'shares' column")
-                    else:
-                        # Convert to holdings format
-                        holdings = []
-                        for _, row in df.iterrows():
-                            holdings.append({
-                                'symbol': str(row['symbol']).upper().strip(),
-                                'shares': float(row['shares'])
-                            })
-                        
-                        st.session_state.holdings = holdings
-                        st.sidebar.success(f"Loaded {len(holdings)} holdings")
-                        
+                    # Sync with session state for editing capabilities
+                    st.session_state.holdings = imported_holdings.copy()
+                    portfolio_holdings = imported_holdings
+                    
+                    st.sidebar.success(f"Loaded {len(portfolio_holdings)} holdings")
+                    
+                    # Auto-save to session
+                    analyzer.save_portfolio_to_session(portfolio_holdings, portfolio_name, portfolio_notes)
+                    
+                    # Show edit interface for CSV uploads
+                    st.sidebar.info("💡 CSV loaded! You can now edit using the controls below or switch to Manual Entry mode.")
+                    
                 except Exception as e:
                     st.sidebar.error(f"Error reading CSV: {str(e)}")
+            
+            # Show editing interface even for CSV uploads
+            if st.session_state.holdings:
+                st.sidebar.subheader("📝 Edit Uploaded Portfolio")
+                
+                edit_mode = st.sidebar.checkbox("✏️ Edit CSV Portfolio", help="Enable editing of uploaded CSV portfolio")
+                
+                if edit_mode:
+                    st.sidebar.write("**Modify uploaded portfolio:**")
+                    
+                    holdings_to_remove = []
+                    holdings_to_update = []
+                    
+                    for i, holding in enumerate(st.session_state.holdings):
+                        col1, col2, col3 = st.sidebar.columns([2, 1, 1])
+                        
+                        with col1:
+                            st.write(f"{holding['symbol']}")
+                        
+                        with col2:
+                            new_shares = st.number_input(
+                                "Shares", 
+                                min_value=0.0, 
+                                value=float(holding['shares']), 
+                                step=1.0,
+                                key=f"csv_edit_shares_{i}",
+                                label_visibility="collapsed"
+                            )
+                            if new_shares != holding['shares']:
+                                holdings_to_update.append((i, new_shares))
+                        
+                        with col3:
+                            if st.button("🗑️", key=f"csv_remove_{i}", help=f"Remove {holding['symbol']}"):
+                                holdings_to_remove.append(i)
+                    
+                    # Apply updates
+                    if holdings_to_update:
+                        for i, new_shares in holdings_to_update:
+                            if new_shares > 0:
+                                st.session_state.holdings[i]['shares'] = new_shares
+                            else:
+                                holdings_to_remove.append(i)
+                    
+                    # Remove holdings
+                    for i in sorted(holdings_to_remove, reverse=True):
+                        st.session_state.holdings.pop(i)
+                        st.rerun()
+                    
+                    # Update portfolio_holdings with changes
+                    portfolio_holdings = st.session_state.holdings
         
         else:  # Sample Portfolio
             st.sidebar.subheader("Sample Dividend Portfolio")
-            st.session_state.holdings = [
+            portfolio_holdings = [
                 {'symbol': 'AAPL', 'shares': 50},
                 {'symbol': 'MSFT', 'shares': 30},
                 {'symbol': 'JNJ', 'shares': 40},
@@ -782,120 +1798,201 @@ def main():
                 {'symbol': 'PFE', 'shares': 40}
             ]
             st.sidebar.info("Using sample dividend-focused portfolio")
-        
-        portfolio_holdings = st.session_state.holdings
-        
-    elif portfolio_action == "📁 Import Portfolio File":
-        st.sidebar.subheader("📁 Import Portfolio")
-        
-        # File upload options
-        upload_format = st.sidebar.radio(
-            "File Format:",
-            ["CSV Format", "JSON Format (Full Backup)"]
-        )
-        
-        uploaded_file = st.sidebar.file_uploader(
-            f"Choose {upload_format.split()[0]} file",
-            type=["csv"] if "CSV" in upload_format else ["json"],
-            help="Upload your portfolio file to restore previous analysis"
-        )
-        
-        if uploaded_file:
-            try:
-                file_content = uploaded_file.read().decode('utf-8')
-                
-                if upload_format == "CSV Format":
-                    df = pd.read_csv(io.StringIO(file_content))
-                    
-                    # Check required columns
-                    if 'symbol' not in df.columns:
-                        st.sidebar.error("CSV must contain 'symbol' column")
-                    elif 'shares' not in df.columns:
-                        st.sidebar.error("CSV must contain 'shares' column")
-                    else:
-                        # Convert to holdings format
-                        imported_holdings = []
-                        for _, row in df.iterrows():
-                            imported_holdings.append({
-                                'symbol': str(row['symbol']).upper().strip(),
-                                'shares': float(row['shares'])
-                            })
-                        
-                        portfolio_holdings = imported_holdings
-                        st.session_state.holdings = imported_holdings  # Also update session
-                        st.sidebar.success(f"✅ Imported {len(imported_holdings)} holdings from CSV")
-                    
-                else:  # JSON Format
-                    data = json.loads(file_content)
-                    
-                    # Validate JSON structure
-                    if 'holdings' not in data:
-                        st.sidebar.error("Invalid portfolio file: missing 'holdings' data")
-                    else:
-                        imported_holdings = data['holdings']
-                        portfolio_holdings = imported_holdings
-                        st.session_state.holdings = imported_holdings  # Also update session
-                        
-                        # Update session with imported metadata
-                        st.session_state.portfolio_name = data.get('portfolio_name', 'Imported Portfolio')
-                        st.session_state.portfolio_notes = data.get('portfolio_notes', '')
-                        
-                        st.sidebar.success(f"✅ Imported portfolio: {data.get('portfolio_name', 'Imported Portfolio')}")
-                        if data.get('created_date'):
-                            st.sidebar.info(f"Created: {data['created_date'][:10]}")
-                
-            except Exception as e:
-                st.sidebar.error(f"❌ Import failed: {str(e)}")
+    
+    # Analysis configuration
+    st.sidebar.header("⚙️ Analysis Settings")
+    analysis_period = st.sidebar.selectbox(
+        "Historical Analysis Period",
+        ["1y", "2y", "3y", "5y", "10y"],
+        index=3,
+        help="Longer periods provide better trend analysis but take more time to load"
+    )
+    
+    # Rate limiting options
+    st.sidebar.subheader("⏱️ Rate Limiting")
+    st.sidebar.info("💡 Yahoo Finance: 1s mandatory delay per call")
+    
+    batch_size = st.sidebar.select_slider(
+        "Batch Size",
+        options=[3, 5, 8, 10, 15],
+        value=5,
+        help="Process stocks in smaller batches to avoid rate limits"
+    )
+    
+    delay_between_batches = st.sidebar.select_slider(
+        "Delay Between Batches (seconds)",
+        options=[5, 10, 15, 20, 30],
+        value=10,
+        help="Wait time between batches to respect API limits"
+    )
+    
+    include_ai_analysis = st.sidebar.checkbox(
+        "Include AI Analysis", 
+        value=True,
+        help="Requires OpenAI API key in secrets"
+    )
+    
+    # Debugging options
+    st.sidebar.subheader("🔍 Debug Options")
+    show_dividend_details = st.sidebar.checkbox(
+        "Show Dividend Fetching Details",
+        value=False,
+        help="Show detailed dividend fetching progress (verbose)"
+    )
+    
+    # Cache options
+    st.sidebar.subheader("💾 Cache Options")
+    use_cache = st.sidebar.checkbox(
+        "Use Session Cache",
+        value=True,
+        help="Cache stock data to avoid repeated API calls"
+    )
+    
+    if st.sidebar.button("🗑️ Clear Cache"):
+        if 'stock_data_cache' in st.session_state:
+            st.session_state.stock_data_cache = {}
+            st.sidebar.success("Cache cleared!")
+    
+    # Data source options
+    st.sidebar.subheader("🔄 Data Sources")
+    use_fallback_apis = st.sidebar.checkbox(
+        "Enable Fallback APIs",
+        value=True,
+        help="Use Alpha Vantage/FMP when Yahoo Finance fails"
+    )
+    
+    # API status indicators
+    yf_status = "🟡 1s delay per call" 
+    av_status = "🔴 No API Key" if not st.secrets.get("ALPHA_VANTAGE_API_KEY") else "🟢 Available"
+    fmp_status = "🔴 No API Key" if not st.secrets.get("FMP_API_KEY") else "🟢 Available"
+    
+    st.sidebar.write(f"**Yahoo Finance:** {yf_status}")
+    st.sidebar.write(f"**Alpha Vantage:** {av_status}")
+    st.sidebar.write(f"**FMP:** {fmp_status}")
+    
+    # Ban recovery helper
+    st.sidebar.subheader("🚨 Rate Limit Recovery")
+    if st.sidebar.button("🧪 Test Connection"):
+        test_symbol = "AAPL"
+        try:
+            test_data = analyzer.fetch_stock_info(test_symbol, retry_count=1, use_fallback=False)
+            if test_data['current_price'] > 0:
+                st.sidebar.success("✅ Yahoo Finance working!")
+            else:
+                st.sidebar.error("❌ Still rate limited")
+        except:
+            st.sidebar.error("❌ Still rate limited")
+    
+    st.sidebar.info("💡 If still rate limited, wait 2-6 hours or enable fallback APIs")
     
     # Main analysis
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
         
-        st.info(f"Analyzing portfolio with {len(portfolio_holdings)} holdings...")
+        # Initialize cache if using it
+        if use_cache and 'stock_data_cache' not in st.session_state:
+            st.session_state.stock_data_cache = {}
+        
+        st.info(f"Analyzing portfolio with {len(portfolio_holdings)} holdings using batch processing...")
         
         # Show optimization mode info
         if st.session_state.optimization_mode:
             st.info("🎯 **Optimization Mode Active** - Enhanced metrics and synthesis table enabled")
         
-        # Fetch current data for all holdings
+        # Show rate limiting info with updated timing
+        estimated_time = (len(portfolio_holdings) * 1.5) + ((len(portfolio_holdings) / batch_size) * delay_between_batches)  # 1.5s per stock + batch delays
+        st.info(f"⏱️ Processing in batches of {batch_size} with {delay_between_batches}s delays + 1s per Yahoo Finance call. Estimated time: {estimated_time:.0f}s")
+        
+        # Fetch current data for all holdings with batch processing
         portfolio_data = []
         progress_bar = st.progress(0)
         status_text = st.empty()
+        batch_info = st.empty()
         
         total_manual_value = 0
         proportional_holdings = []
         
-        # First pass: fetch data for all holdings and calculate manual value
-        for i, holding in enumerate(portfolio_holdings):
-            symbol = holding['symbol']
+        # Process in batches to avoid rate limiting
+        for batch_start in range(0, len(portfolio_holdings), batch_size):
+            batch_end = min(batch_start + batch_size, len(portfolio_holdings))
+            current_batch = portfolio_holdings[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(portfolio_holdings) + batch_size - 1) // batch_size
             
-            status_text.text(f'Fetching data for {symbol}... ({i + 1}/{len(portfolio_holdings)})')
-            progress_bar.progress((i + 1) / len(portfolio_holdings))
+            batch_info.info(f"📦 Processing batch {batch_num}/{total_batches} ({len(current_batch)} stocks)")
             
-            stock_info = analyzer.fetch_stock_info(symbol)
+            for i, holding in enumerate(current_batch):
+                symbol = holding['symbol']
+                overall_progress = (batch_start + i + 1) / len(portfolio_holdings)
+                
+                status_text.text(f'Fetching data for {symbol}... ({batch_start + i + 1}/{len(portfolio_holdings)})')
+                progress_bar.progress(overall_progress)
+                
+                # Check cache first
+                if use_cache and symbol in st.session_state.stock_data_cache:
+                    # Check if cached data is recent (less than 1 hour old)
+                    cached_data = st.session_state.stock_data_cache[symbol]
+                    if 'cache_time' in cached_data:
+                        cache_time = datetime.fromisoformat(cached_data['cache_time'])
+                        if datetime.now() - cache_time < timedelta(hours=1):
+                            stock_info = cached_data.copy()
+                            stock_info.pop('cache_time', None)  # Remove cache timestamp
+                            
+                            # Handle proportional vs manual allocation
+                            if holding.get('allocation_method') == 'proportional':
+                                # Store for second pass
+                                proportional_holdings.append({
+                                    'stock_info': stock_info,
+                                    'target_weight': holding.get('target_weight', 0),
+                                    'index': batch_start + i
+                                })
+                            else:
+                                stock_info['shares'] = holding['shares']
+                                portfolio_data.append(stock_info)
+                                total_manual_value += stock_info['current_price'] * holding['shares']
+                            
+                            status_text.text(f'Using cached data for {symbol}... ({batch_start + i + 1}/{len(portfolio_holdings)})')
+                            continue
+                
+                # Fetch new data
+                stock_info = analyzer.fetch_stock_info(symbol, use_fallback=use_fallback_apis)
+                
+                # Handle proportional vs manual allocation
+                if holding.get('allocation_method') == 'proportional':
+                    # Store for second pass
+                    proportional_holdings.append({
+                        'stock_info': stock_info,
+                        'target_weight': holding.get('target_weight', 0),
+                        'index': batch_start + i
+                    })
+                else:
+                    stock_info['shares'] = holding['shares']
+                    portfolio_data.append(stock_info)
+                    total_manual_value += stock_info['current_price'] * holding['shares']
+                
+                # Cache the data if using cache
+                if use_cache and stock_info['current_price'] > 0:  # Only cache successful fetches
+                    cache_data = stock_info.copy()
+                    cache_data['cache_time'] = datetime.now().isoformat()
+                    st.session_state.stock_data_cache[symbol] = cache_data
             
-            if holding.get('allocation_method') == 'proportional':
-                # Store for second pass
-                proportional_holdings.append({
-                    'stock_info': stock_info,
-                    'target_weight': holding.get('target_weight', 0),
-                    'index': i
-                })
-            else:
-                stock_info['shares'] = holding['shares']
-                portfolio_data.append(stock_info)
-                total_manual_value += stock_info['current_price'] * holding['shares']
+            # Wait between batches (except for the last batch)
+            if batch_end < len(portfolio_holdings):
+                status_text.text(f'Waiting {delay_between_batches}s before next batch...')
+                time.sleep(delay_between_batches)
         
         # Second pass: calculate proportional shares
         if proportional_holdings:
             # Estimate total portfolio value to calculate proportional shares
-            estimated_proportional_value = total_manual_value * 0.3  # Assume proportional holdings are 30% of total
+            estimated_total_value = total_manual_value / 0.7 if total_manual_value > 0 else 100000  # Assume manual holdings are 70% of total
+            
+            status_text.text('Calculating proportional allocations...')
             
             for prop_holding in proportional_holdings:
                 stock_info = prop_holding['stock_info']
                 target_weight = prop_holding['target_weight']
                 
                 if stock_info['current_price'] > 0:
-                    target_value = estimated_proportional_value * target_weight
+                    target_value = estimated_total_value * target_weight
                     calculated_shares = target_value / stock_info['current_price']
                     stock_info['shares'] = max(1, int(calculated_shares))  # At least 1 share
                 else:
@@ -905,18 +2002,40 @@ def main():
         
         progress_bar.empty()
         status_text.empty()
+        batch_info.empty()
         
         portfolio_df = pd.DataFrame(portfolio_data)
         
         # Calculate portfolio metrics
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
-        # Calculate synthesis metrics if in optimization mode
+        # NEW: Calculate synthesis metrics if in optimization mode
         synthesis_metrics = None
-        if st.session_state.optimization_mode:
-            synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
+        historical_performance = None
         
-        # SYNTHESIS TABLE (Top of page in optimization mode)
+        if st.session_state.optimization_mode:
+            # For optimization mode, calculate historical performance first to get accurate synthesis metrics
+            with st.spinner("Calculating synthesis metrics..."):
+                years = int(analysis_period[0]) if analysis_period[0].isdigit() else int(analysis_period[:2])
+                # Quick historical analysis for synthesis (smaller batch size to be faster)
+                historical_performance = analyzer.simulate_historical_performance(
+                    portfolio_holdings, 
+                    years=min(2, years),  # Use shorter period for synthesis calculations
+                    batch_size=min(5, batch_size), 
+                    delay=min(5, delay_between_batches),
+                    show_dividend_details=False
+                )
+                
+                synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics, historical_performance)
+        
+        # Auto-save analyzed portfolio to session
+        analyzer.save_portfolio_to_session(
+            portfolio_holdings, 
+            st.session_state.portfolio_name, 
+            st.session_state.portfolio_notes
+        )
+        
+        # NEW: SYNTHESIS TABLE (Top of page in optimization mode)
         if st.session_state.optimization_mode and synthesis_metrics:
             st.header("🎯 Portfolio Optimization Synthesis")
             
@@ -924,38 +2043,46 @@ def main():
             col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
+                sharpe_delta = synthesis_metrics['sharpe_ratio'] - 1.0  # Compare to market baseline
                 st.metric(
                     "Sharpe Ratio", 
                     f"{synthesis_metrics['sharpe_ratio']:.2f}",
+                    delta=f"{sharpe_delta:+.2f}" if abs(sharpe_delta) > 0.01 else None,
                     help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)"
                 )
             
             with col2:
                 st.metric(
                     "Opportunity Margin", 
-                    f"{synthesis_metrics['mean_opportunity_margin']:.1f}%",
-                    help="Valuation opportunity vs market average"
+                    f"{synthesis_metrics['mean_opportunity_margin']:+.1f}%",
+                    help="Valuation opportunity vs market average (+% = undervalued)"
                 )
             
             with col3:
+                return_delta = synthesis_metrics['annualized_total_return'] - 10.0  # Compare to 10% market average
                 st.metric(
                     "Ann. Total Return", 
                     f"{synthesis_metrics['annualized_total_return']:.1f}%",
+                    delta=f"{return_delta:+.1f}%" if abs(return_delta) > 0.1 else None,
                     help="Expected annual return with dividends reinvested"
                 )
             
             with col4:
+                div_delta = synthesis_metrics['sector_diversification_score'] - 75  # Compare to good diversification
                 st.metric(
                     "Diversification Score", 
                     f"{synthesis_metrics['sector_diversification_score']:.0f}/100",
+                    delta=f"{div_delta:+.0f}" if abs(div_delta) > 1 else None,
                     help="Sector diversification quality score"
                 )
             
             with col5:
                 score_color = "🟢" if synthesis_metrics['overall_portfolio_score'] >= 75 else "🟡" if synthesis_metrics['overall_portfolio_score'] >= 50 else "🔴"
+                score_delta = synthesis_metrics['overall_portfolio_score'] - 70  # Compare to good portfolio
                 st.metric(
                     "Portfolio Score", 
                     f"{score_color} {synthesis_metrics['overall_portfolio_score']:.0f}/100",
+                    delta=f"{score_delta:+.0f}" if abs(score_delta) > 1 else None,
                     help="Overall portfolio optimization score"
                 )
             
@@ -989,6 +2116,8 @@ def main():
                     st.info(insight)
             else:
                 st.success("🎯 **Well-Optimized Portfolio**: No major optimization opportunities identified")
+            
+            st.markdown("---")
         
         # Display key metrics
         st.header("📊 Portfolio Overview")
@@ -1021,6 +2150,50 @@ def main():
                 f"{metrics['weighted_pe']:.1f}",
                 "Portfolio Average"
             )
+        
+        # Advanced Risk Metrics
+        st.subheader("📈 Advanced Risk Metrics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            alpha_color = "normal" if abs(metrics['portfolio_alpha']) < 0.02 else ("inverse" if metrics['portfolio_alpha'] > 0 else "off")
+            st.metric(
+                "Portfolio Alpha", 
+                f"{metrics['portfolio_alpha']:.3f}",
+                help="Excess return vs market (positive = outperforming)"
+            )
+        
+        with col2:
+            sharpe_color = "normal" if metrics['sharpe_ratio'] > 1.0 else "off"
+            st.metric(
+                "Sharpe Ratio", 
+                f"{metrics['sharpe_ratio']:.2f}",
+                help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)"
+            )
+        
+        with col3:
+            st.metric(
+                "Information Ratio", 
+                f"{metrics['information_ratio']:.2f}",
+                help="Alpha per unit of tracking error"
+            )
+        
+        with col4:
+            volatility_estimate = metrics['portfolio_beta'] * 16  # Rough volatility estimate
+            st.metric(
+                "Est. Volatility", 
+                f"{volatility_estimate:.1f}%",
+                help="Estimated annual volatility"
+            )
+        
+        # Risk interpretation
+        st.info(f"""
+        **🎯 Risk Profile Summary:**
+        - **Beta {metrics['portfolio_beta']:.2f}**: {'Lower' if metrics['portfolio_beta'] < 0.8 else 'Higher' if metrics['portfolio_beta'] > 1.2 else 'Similar'} risk vs market
+        - **Alpha {metrics['portfolio_alpha']:.3f}**: {'Outperforming' if metrics['portfolio_alpha'] > 0.01 else 'Underperforming' if metrics['portfolio_alpha'] < -0.01 else 'Matching'} market expectations
+        - **Sharpe {metrics['sharpe_ratio']:.2f}**: {'Excellent' if metrics['sharpe_ratio'] > 2.0 else 'Good' if metrics['sharpe_ratio'] > 1.0 else 'Poor'} risk-adjusted returns
+        """)
         
         # Holdings table with allocation info
         st.header("📋 Current Holdings")
@@ -1140,12 +2313,561 @@ def main():
                 fig_holdings.update_layout(yaxis={'categoryorder': 'total ascending'})
                 st.plotly_chart(fig_holdings, use_container_width=True)
         
-        # Auto-save analyzed portfolio to session
-        analyzer.save_portfolio_to_session(
+        # Historical Performance Analysis
+        st.header("📊 Historical Performance Analysis")
+        st.info("💡 **Total Return** includes both price appreciation AND dividend reinvestment")
+        
+        # Market composition analysis
+        us_stocks = [h for h in portfolio_holdings if '.' not in h['symbol']]
+        intl_stocks = [h for h in portfolio_holdings if '.' in h['symbol']]
+        
+        if len(us_stocks) > 0 and len(intl_stocks) > 0:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"🇺🇸 **US Stocks**: {len(us_stocks)} holdings")
+            with col2:
+                st.info(f"🌍 **International**: {len(intl_stocks)} holdings")
+            
+            st.warning("⚠️ **Mixed Markets Detected**: US and international stocks have different trading calendars, which may limit historical data overlap. Consider analyzing separately for better coverage.")
+            
+            # Option to analyze separately
+            analyze_separately = st.checkbox("📊 Analyze markets separately for better data coverage", value=False)
+            
+            if analyze_separately:
+                # Analyze US stocks first
+                if us_stocks:
+                    st.subheader("🇺🇸 US Stocks Performance")
+                    with st.spinner("Analyzing US stocks..."):
+                        us_performance = analyzer.simulate_historical_performance(
+                            us_stocks, 
+                            years, 
+                            batch_size=batch_size, 
+                            delay=delay_between_batches,
+                            show_dividend_details=show_dividend_details
+                        )
+                    
+                    if not us_performance.empty:
+                        # Show US performance chart
+                        fig_us = go.Figure()
+                        fig_us.add_trace(go.Scatter(
+                            x=us_performance.index,
+                            y=us_performance['Total_Return'],
+                            mode='lines',
+                            name='US Stocks Total Return',
+                            line=dict(color='blue', width=2)
+                        ))
+                        fig_us.update_layout(
+                            title="US Stocks - Total Return",
+                            xaxis_title="Date",
+                            yaxis_title="Return (%)",
+                            height=300
+                        )
+                        st.plotly_chart(fig_us, use_container_width=True)
+                
+                # Analyze International stocks
+                if intl_stocks:
+                    st.subheader("🌍 International Stocks Performance")
+                    with st.spinner("Analyzing international stocks..."):
+                        intl_performance = analyzer.simulate_historical_performance(
+                            intl_stocks, 
+                            years, 
+                            batch_size=batch_size, 
+                            delay=delay_between_batches,
+                            show_dividend_details=show_dividend_details
+                        )
+                    
+                    if not intl_performance.empty:
+                        # Show International performance chart
+                        fig_intl = go.Figure()
+                        fig_intl.add_trace(go.Scatter(
+                            x=intl_performance.index,
+                            y=intl_performance['Total_Return'],
+                            mode='lines',
+                            name='International Stocks Total Return',
+                            line=dict(color='green', width=2)
+                        ))
+                        fig_intl.update_layout(
+                            title="International Stocks - Total Return",
+                            xaxis_title="Date",
+                            yaxis_title="Return (%)",
+                            height=300
+                        )
+                        st.plotly_chart(fig_intl, use_container_width=True)
+                
+                return  # Skip combined analysis if analyzing separately
+        
+        # Combined historical analysis (if not using synthesis metrics or if user wants full analysis)
+        if not st.session_state.optimization_mode or historical_performance is None:
+            with st.spinner("Calculating historical performance..."):
+                years = int(analysis_period[0]) if analysis_period[0].isdigit() else int(analysis_period[:2])
+                historical_performance = analyzer.simulate_historical_performance(
+                    portfolio_holdings, 
+                    years, 
+                    batch_size=batch_size, 
+                    delay=delay_between_batches,
+                    show_dividend_details=show_dividend_details
+                )
+        
+        if not historical_performance.empty:
+            # Performance chart with both total return and price-only return
+            fig_performance = make_subplots(
+                rows=3, cols=1,
+                subplot_titles=(
+                    f'Portfolio Value Over Time ({years} Years)', 
+                    'Total Return vs Price-Only Return (%)',
+                    'Cumulative Dividends Received'
+                ),
+                vertical_spacing=0.08
+            )
+            
+            # Portfolio value
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Portfolio_Value'],
+                    mode='lines',
+                    name='Portfolio Value',
+                    line=dict(color='blue', width=2)
+                ),
+                row=1, col=1
+            )
+            
+            # Total return vs price-only return
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Total_Return'],
+                    mode='lines',
+                    name='Total Return (w/ Dividends)',
+                    line=dict(color='green', width=2)
+                ),
+                row=2, col=1
+            )
+            
+            if 'Price_Only_Return' in historical_performance.columns:
+                fig_performance.add_trace(
+                    go.Scatter(
+                        x=historical_performance.index,
+                        y=historical_performance['Price_Only_Return'],
+                        mode='lines',
+                        name='Price-Only Return',
+                        line=dict(color='orange', width=2, dash='dash')
+                    ),
+                    row=2, col=1
+                )
+            
+            # Cumulative dividends
+            fig_performance.add_trace(
+                go.Scatter(
+                    x=historical_performance.index,
+                    y=historical_performance['Total_Dividends'],
+                    mode='lines',
+                    name='Cumulative Dividends',
+                    line=dict(color='purple', width=2),
+                    fill='tonexty'
+                ),
+                row=3, col=1
+            )
+            
+            fig_performance.update_layout(height=800, showlegend=True)
+            fig_performance.update_xaxes(title_text="Date", row=3, col=1)
+            fig_performance.update_yaxes(title_text="Value ($)", row=1, col=1)
+            fig_performance.update_yaxes(title_text="Return (%)", row=2, col=1)
+            fig_performance.update_yaxes(title_text="Dividends ($)", row=3, col=1)
+            
+            st.plotly_chart(fig_performance, use_container_width=True)
+            
+            # Performance summary with dividend impact
+            if len(historical_performance) > 1:
+                total_return = historical_performance['Total_Return'].iloc[-1]
+                price_only_return = historical_performance['Price_Only_Return'].iloc[-1] if 'Price_Only_Return' in historical_performance.columns else 0
+                dividend_contribution = total_return - price_only_return
+                annual_total_return = (1 + total_return/100) ** (1/years) - 1
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric(
+                        "Total Return", 
+                        f"{total_return:.1f}%",
+                        help="Includes price appreciation + dividends"
+                    )
+                with col2:
+                    st.metric(
+                        "Annualized Return", 
+                        f"{annual_total_return*100:.1f}%",
+                        help="Compound annual growth rate"
+                    )
+                with col3:
+                    final_dividends = historical_performance['Total_Dividends'].iloc[-1]
+                    st.metric(
+                        "Total Dividends", 
+                        f"${final_dividends:,.0f}",
+                        help="Cumulative dividends received"
+                    )
+                with col4:
+                    st.metric(
+                        "Dividend Contribution", 
+                        f"{dividend_contribution:.1f}%",
+                        help="Return boost from dividends"
+                    )
+                
+                # Explanation of total return
+                st.info(f"""
+                📈 **{years}-Year Performance Summary:**
+                - **Total Return**: {total_return:.1f}% (includes dividends reinvested)
+                - **Price-Only Return**: {price_only_return:.1f}% (capital appreciation only)
+                - **Dividend Boost**: {dividend_contribution:.1f}% additional return from dividends
+                - **Annual Compound Rate**: {annual_total_return*100:.1f}% per year
+                """)
+        else:
+            st.warning("Unable to fetch sufficient historical data for performance analysis.")
+        
+        # Dividend Calendar - Historical Analysis
+        st.header("📅 Historical Dividend Calendar (Last 12 Months)")
+        st.info("💰 **Actual dividend payments received** - showing real dividend income history")
+        
+        dividend_history, daily_dividends, monthly_dividends = analyzer.generate_historical_dividend_calendar(
             portfolio_holdings, 
-            st.session_state.portfolio_name, 
-            st.session_state.portfolio_notes
+            batch_size=batch_size, 
+            delay=2  # Shorter delay for dividend calendar
         )
+        
+        if not dividend_history.empty:
+            # Summary metrics
+            total_dividends_received = dividend_history['Total_Dividend_Received'].sum()
+            avg_monthly_dividends = monthly_dividends['Total_Dividend_Received'].mean() if not monthly_dividends.empty else 0
+            dividend_payments_count = len(dividend_history)
+            unique_companies = dividend_history['Symbol'].nunique()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Dividends Received", f"${total_dividends_received:,.2f}")
+            with col2:
+                st.metric("Average Monthly", f"${avg_monthly_dividends:,.2f}")
+            with col3:
+                st.metric("Total Payments", dividend_payments_count)
+            with col4:
+                st.metric("Dividend-Paying Stocks", unique_companies)
+            
+            # Main visualizations
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("📊 Daily Dividend Payments")
+                
+                if not daily_dividends.empty:
+                    # Create detailed daily bar chart
+                    fig_daily = go.Figure()
+                    
+                    # Add bars for daily dividends
+                    fig_daily.add_trace(go.Bar(
+                        x=daily_dividends['Date'],
+                        y=daily_dividends['Total_Dividend_Received'],
+                        text=daily_dividends['Companies'],
+                        textposition='outside',
+                        hovertemplate='<br>'.join([
+                            'Date: %{x}',
+                            'Dividend: $%{y:.2f}',
+                            'Companies: %{text}',
+                            '<extra></extra>'
+                        ]),
+                        marker_color='green',
+                        name='Daily Dividends'
+                    ))
+                    
+                    fig_daily.update_layout(
+                        title="Daily Dividend Payments - Last 12 Months",
+                        xaxis_title="Date",
+                        yaxis_title="Dividend Amount ($)",
+                        hovermode='x',
+                        height=400,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # Monthly aggregation chart with detailed hover
+                if not monthly_dividends.empty:
+                    st.subheader("📈 Monthly Dividend Summary")
+                    
+                    # Create detailed monthly data with stock information
+                    monthly_detail = dividend_history.groupby('Month').agg({
+                        'Total_Dividend_Received': 'sum',
+                        'Symbol': lambda x: ', '.join(sorted(x.unique())),
+                        'Dividend_Per_Share': 'count'
+                    }).reset_index()
+                    monthly_detail.rename(columns={
+                        'Symbol': 'Paying_Stocks',
+                        'Dividend_Per_Share': 'Payment_Count'
+                    }, inplace=True)
+                    
+                    fig_monthly = go.Figure()
+                    
+                    fig_monthly.add_trace(go.Bar(
+                        x=monthly_detail['Month'],
+                        y=monthly_detail['Total_Dividend_Received'],
+                        text=monthly_detail['Total_Dividend_Received'].apply(lambda x: f'${x:.0f}'),
+                        textposition='outside',
+                        hovertemplate='<br>'.join([
+                            '<b>%{x}</b>',
+                            'Total Dividends: $%{y:.2f}',
+                            'Paying Stocks: %{customdata[0]}',
+                            'Number of Payments: %{customdata[1]}',
+                            '<extra></extra>'
+                        ]),
+                        customdata=monthly_detail[['Paying_Stocks', 'Payment_Count']],
+                        marker_color='darkgreen',
+                        name='Monthly Dividends'
+                    ))
+                    
+                    fig_monthly.update_layout(
+                        title="Monthly Dividend Income - Hover for Stock Details",
+                        xaxis_title="Month",
+                        yaxis_title="Dividend Amount ($)",
+                        height=300,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            with col2:
+                st.subheader("🏢 Dividend by Company")
+                
+                # Company dividend summary
+                company_summary = dividend_history.groupby('Symbol').agg({
+                    'Total_Dividend_Received': 'sum',
+                    'Dividend_Per_Share': 'count',  # Number of payments
+                    'Date': 'max'  # Last payment date
+                }).reset_index()
+                company_summary.rename(columns={
+                    'Dividend_Per_Share': 'Payment_Count',
+                    'Date': 'Last_Payment'
+                }, inplace=True)
+                company_summary = company_summary.sort_values('Total_Dividend_Received', ascending=False)
+                
+                # Company pie chart
+                fig_pie = px.pie(
+                    company_summary.head(10),  # Top 10 to avoid clutter
+                    values='Total_Dividend_Received',
+                    names='Symbol',
+                    title="Dividend Distribution by Company"
+                )
+                fig_pie.update_layout(height=300)
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Top dividend payers table
+                st.subheader("🏆 Top Dividend Payers")
+                top_payers = company_summary.head(10).copy()
+                top_payers['Total_Dividend_Received'] = top_payers['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+                top_payers['Last_Payment'] = top_payers['Last_Payment'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                
+                st.dataframe(
+                    top_payers[['Symbol', 'Total_Dividend_Received', 'Payment_Count', 'Last_Payment']],
+                    column_config={
+                        "Symbol": "Stock",
+                        "Total_Dividend_Received": "Total Received",
+                        "Payment_Count": "# Payments",
+                        "Last_Payment": "Last Payment"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Detailed dividend history table
+            st.subheader("📋 Complete Dividend Payment History")
+            
+            # Format the dividend history for display
+            display_history = dividend_history.copy()
+            display_history['Date'] = display_history['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
+            display_history['Dividend_Per_Share'] = display_history['Dividend_Per_Share'].apply(lambda x: f"${x:.4f}")
+            display_history['Total_Dividend_Received'] = display_history['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+            
+            # Sort by date (most recent first)
+            display_history = display_history.sort_values('Date', ascending=False)
+            
+            # Show recent payments with expandable view
+            with st.expander("📜 View All Dividend Payments", expanded=False):
+                st.dataframe(
+                    display_history[['Date', 'Symbol', 'Dividend_Per_Share', 'Shares_Owned', 'Total_Dividend_Received', 'Quarter']],
+                    column_config={
+                        "Date": "Payment Date",
+                        "Symbol": "Stock", 
+                        "Dividend_Per_Share": "Per Share",
+                        "Shares_Owned": "Shares",
+                        "Total_Dividend_Received": "Amount Received",
+                        "Quarter": "Quarter"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Show recent payments (last 10) by default
+            st.write("**🕒 Recent Dividend Payments (Last 10):**")
+            recent_payments = display_history.head(10)
+            st.dataframe(
+                recent_payments[['Date', 'Symbol', 'Dividend_Per_Share', 'Total_Dividend_Received']],
+                column_config={
+                    "Date": "Payment Date",
+                    "Symbol": "Stock",
+                    "Dividend_Per_Share": "Per Share", 
+                    "Total_Dividend_Received": "Amount Received"
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Dividend frequency analysis
+            st.subheader("📊 Dividend Payment Analysis")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Payment frequency by company
+                payment_freq = dividend_history.groupby('Symbol')['Date'].count().reset_index()
+                payment_freq.rename(columns={'Date': 'Payment_Count'}, inplace=True)
+                avg_payments = payment_freq['Payment_Count'].mean()
+                
+                st.metric("Average Payments per Stock", f"{avg_payments:.1f}")
+                
+                # Most frequent payers
+                frequent_payers = payment_freq.sort_values('Payment_Count', ascending=False).head(5)
+                st.write("**Most Frequent Payers:**")
+                for _, row in frequent_payers.iterrows():
+                    st.write(f"• {row['Symbol']}: {row['Payment_Count']} payments")
+            
+            with col2:
+                # Quarterly analysis
+                quarterly_summary = dividend_history.groupby('Quarter')['Total_Dividend_Received'].sum().reset_index()
+                quarterly_summary = quarterly_summary.sort_values('Total_Dividend_Received', ascending=False)
+                
+                if not quarterly_summary.empty:
+                    best_quarter = quarterly_summary.iloc[0]
+                    st.metric("Best Quarter", best_quarter['Quarter'], f"${best_quarter['Total_Dividend_Received']:.2f}")
+                    
+                    st.write("**Quarterly Performance:**")
+                    for _, row in quarterly_summary.iterrows():
+                        st.write(f"• {row['Quarter']}: ${row['Total_Dividend_Received']:.2f}")
+            
+            with col3:
+                # Seasonality analysis
+                dividend_history['Month_Num'] = pd.to_datetime(dividend_history['Date']).dt.month
+                monthly_counts = dividend_history.groupby('Month_Num')['Total_Dividend_Received'].agg(['sum', 'count']).reset_index()
+                monthly_counts['Month_Name'] = monthly_counts['Month_Num'].apply(lambda x: calendar.month_abbr[x])
+                
+                if not monthly_counts.empty:
+                    best_month = monthly_counts.loc[monthly_counts['sum'].idxmax()]
+                    st.metric("Best Month", best_month['Month_Name'], f"${best_month['sum']:.2f}")
+                    
+                    st.write("**Top Months:**")
+                    top_months = monthly_counts.sort_values('sum', ascending=False).head(3)
+                    for _, row in top_months.iterrows():
+                        st.write(f"• {row['Month_Name']}: ${row['sum']:.2f}")
+        
+        else:
+            st.warning("No dividend payments found in the last 12 months for this portfolio.")
+            st.info("💡 This could mean:")
+            st.write("• Your stocks don't pay dividends (growth stocks)")
+            st.write("• Dividend payments are outside the 12-month window")
+            st.write("• Data fetching issues with some stocks")
+            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)")
+        
+        # AI-Powered Analysis
+        if include_ai_analysis:
+            st.header("🤖 AI Portfolio Analysis")
+            
+            with st.spinner("Generating AI analysis..."):
+                ai_analysis = analyzer.analyze_portfolio_with_ai(portfolio_df, metrics)
+            
+            st.markdown(ai_analysis)
+        
+        # Export options
+        st.header("📥 Export & Backup Options")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            # Export portfolio summary
+            summary_data = {
+                'Portfolio Summary': [
+                    f"Portfolio Name: {st.session_state.portfolio_name}",
+                    f"Total Value: ${metrics['total_value']:,.2f}",
+                    f"Annual Dividends: ${metrics['annual_dividends']:,.2f}",
+                    f"Portfolio Yield: {metrics['portfolio_dividend_yield']:.2f}%",
+                    f"Portfolio Beta: {metrics['portfolio_beta']:.2f}",
+                    f"Number of Holdings: {len(portfolio_df)}",
+                    f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                ]
+            }
+            
+            # Add synthesis metrics if available
+            if synthesis_metrics:
+                summary_data['Optimization Metrics'] = [
+                    f"Sharpe Ratio: {synthesis_metrics['sharpe_ratio']:.2f}",
+                    f"Opportunity Margin: {synthesis_metrics['mean_opportunity_margin']:+.1f}%",
+                    f"Ann. Total Return: {synthesis_metrics['annualized_total_return']:.1f}%",
+                    f"Diversification Score: {synthesis_metrics['sector_diversification_score']:.0f}/100",
+                    f"Overall Score: {synthesis_metrics['overall_portfolio_score']:.0f}/100"
+                ]
+            
+            summary_df = pd.DataFrame(summary_data)
+            csv_summary = summary_df.to_csv(index=False)
+            
+            st.download_button(
+                label="📊 Download Summary",
+                data=csv_summary,
+                file_name=f"{st.session_state.portfolio_name.replace(' ', '_')}_summary.csv",
+                mime="text/csv"
+            )
+        
+        with col2:
+            # Export enhanced holdings CSV
+            csv_holdings = analyzer.export_portfolio_csv(portfolio_df)
+            
+            st.download_button(
+                label="📋 Download Holdings CSV",
+                data=csv_holdings,
+                file_name=f"{st.session_state.portfolio_name.replace(' ', '_')}_holdings.csv",
+                mime="text/csv"
+            )
+        
+        with col3:
+            # Export complete portfolio backup (JSON)
+            json_backup = analyzer.export_portfolio_json(
+                portfolio_holdings, 
+                metrics, 
+                st.session_state.portfolio_name
+            )
+            
+            st.download_button(
+                label="💾 Download Full Backup",
+                data=json_backup,
+                file_name=f"{st.session_state.portfolio_name.replace(' ', '_')}_backup.json",
+                mime="application/json",
+                help="Complete portfolio backup with all settings and analysis"
+            )
+        
+        with col4:
+            # Export historical performance
+            if not historical_performance.empty:
+                csv_performance = historical_performance.to_csv()
+                
+                st.download_button(
+                    label="📈 Download Performance",
+                    data=csv_performance,
+                    file_name=f"{st.session_state.portfolio_name.replace(' ', '_')}_performance.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.button("📈 No Performance Data", disabled=True)
+        
+        # Additional export info
+        st.info("""
+        **💾 Export Options:**
+        - **Summary**: Key metrics and overview (includes optimization metrics if available)
+        - **Holdings CSV**: Current portfolio with market data  
+        - **Full Backup**: Complete portfolio backup (restore with all settings)
+        - **Performance**: Historical analysis data
+        """)
         
         st.success("✅ Portfolio analysis complete!")
     
@@ -1158,35 +2880,74 @@ def main():
             st.warning(f"💡 You have a saved portfolio ({len(st.session_state.portfolio_holdings)} holdings). Use 'Load Saved Portfolio' to restore it.")
         
         st.markdown("---")
-        st.subheader("🎯 Portfolio Optimization Features")
-        st.markdown("""
-        **New Optimization Features:**
         
-        🎯 **Synthesis Table:**
-        - Sharpe coefficient for risk-adjusted returns
-        - Mean opportunity margin (valuation analysis)
-        - Annualized total return with dividend reinvestment
-        - Sector diversification score (0-100)
-        - Overall portfolio optimization score
-        
-        ⚖️ **Smart Proportional Allocation:**
-        - Add stocks without specifying shares
-        - Automatic equal-weight or custom-weight allocation
-        - Portfolio rebalancing suggestions
-        - Target allocation tracking
-        
-        📊 **Enhanced Analytics:**
-        - Optimization radar chart
-        - Real-time optimization insights
-        - Sector concentration analysis
-        - Value opportunity identification
-        
-        🚀 **Iterative Optimization:**
-        - Compare multiple portfolio configurations
-        - Track optimization score improvements
-        - Automated rebalancing recommendations
-        - Performance vs benchmark analysis
-        """)
+        # Show different info based on optimization mode
+        if st.session_state.optimization_mode:
+            st.subheader("🎯 Portfolio Optimization Features")
+            st.markdown("""
+            **Enhanced Optimization Features:**
+            
+            🎯 **Synthesis Table:**
+            - **Sharpe Ratio**: Risk-adjusted return coefficient for performance evaluation
+            - **Mean Opportunity Margin**: Valuation analysis vs market average (+% = undervalued)
+            - **Annualized Total Return**: Expected return with dividend reinvestment
+            - **Sector Diversification Score**: 0-100 quality score for sector balance
+            - **Overall Portfolio Score**: Weighted optimization score combining all metrics
+            
+            ⚖️ **Smart Proportional Allocation:**
+            - **Equal Weight**: Add stocks with automatic equal allocation (if you have 9 stocks, new stock gets 10%)
+            - **Custom Weight**: Specify exact percentage allocation for new holdings
+            - **Auto-calculation**: System calculates shares based on target weights and current prices
+            - **Mixed Allocation**: Combine manual share specification with proportional weighting
+            
+            📊 **Enhanced Analytics:**
+            - **Optimization Radar Chart**: Visual dashboard showing all key optimization metrics
+            - **Real-time Insights**: Automatic recommendations based on portfolio analysis
+            - **Allocation Tracking**: See which holdings are manual vs auto-allocated
+            - **Performance Benchmarking**: Compare against optimization targets
+            
+            🚀 **Iterative Optimization Workflow:**
+            - Test different portfolio configurations quickly
+            - Track optimization score improvements over time
+            - Get actionable recommendations for portfolio enhancement
+            - Export optimized configurations for implementation
+            """)
+        else:
+            st.subheader("ℹ️ About This Portfolio Analyzer")
+            st.markdown("""
+            This comprehensive tool provides:
+            
+            **📊 Core Analytics:**
+            - Real-time portfolio valuation
+            - Dividend income analysis and projections
+            - Sector and geographic diversification
+            - Risk metrics (Beta, concentration analysis)
+            - Historical performance simulation
+            
+            **📅 Dividend Calendar:**
+            - Monthly dividend distribution
+            - Upcoming dividend payments
+            - Dividend frequency analysis
+            
+            **🤖 AI-Powered Insights:**
+            - Automated portfolio assessment
+            - Diversification recommendations
+            - Risk analysis and suggestions
+            - Performance optimization tips
+            
+            **📈 Visualizations:**
+            - Interactive charts and graphs
+            - Sector allocation pie charts
+            - Historical performance curves
+            - Top holdings analysis
+            
+            **🔧 Input Methods:**
+            - Manual entry of holdings
+            - CSV file upload
+            - Sample portfolio for testing
+            
+            💡 **Enable Optimization Mode** in the sidebar for advanced optimization features!
+            """)
         
         st.markdown("---")
         st.markdown("**⚠️ Disclaimer:** This tool is for educational and analysis purposes only. Past performance does not guarantee future results. Always consult with financial advisors before making investment decisions.")
