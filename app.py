@@ -1834,7 +1834,7 @@ def main():
             st.write("• Your stocks don't pay dividends (growth stocks)")
             st.write("• Dividend payments are outside the 12-month window")
             st.write("• Data fetching issues with some stocks")
-            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)"))
+            st.write("• Try including some dividend-paying stocks (e.g., KO, JNJ, PG)")
         
         # AI-Powered Analysis
         if include_ai_analysis:
