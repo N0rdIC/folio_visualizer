@@ -277,7 +277,7 @@ class PortfolioAnalyzer:
             ),
             specs=[[{"type": "bar"}, {"type": "bar"}],
                    [{"colspan": 2}, None]],
-            vertical_spacing=0.15,
+            vertical_spacing=0.20,
             horizontal_spacing=0.1
         )
         
@@ -321,36 +321,60 @@ class PortfolioAnalyzer:
             name="Risk Components"
         ), row=1, col=2)
         
-        # Sharpe formula visualization
+        # Sharpe formula visualization - make it more prominent
         fig.add_trace(go.Scatter(
-            x=[0, 1, 2, 3],
-            y=[2, 2, 2, 2],
+            x=[0.5, 1.5, 2.5, 3.5],
+            y=[2.1, 2.1, 2.1, 2.1],
             mode='text',
             text=[
-                f"Expected Return<br>{sharpe_details['expected_return']*100:.1f}%",
-                "−",
-                f"Risk-Free Rate<br>{sharpe_details['risk_free_rate']*100:.1f}%",
-                f"÷ Portfolio Risk<br>{sharpe_details['portfolio_volatility']*100:.1f}%"
+                f"Expected Return<br><b>{sharpe_details['expected_return']*100:.1f}%</b>",
+                f"Risk-Free Rate<br><b>{sharpe_details['risk_free_rate']*100:.1f}%</b>",
+                f"Portfolio Volatility<br><b>{sharpe_details['portfolio_volatility']*100:.1f}%</b>",
+                f"<b>Sharpe Ratio<br>{sharpe_details['sharpe_ratio']:.2f}</b>"
             ],
-            textfont=dict(size=14),
+            textfont=dict(size=14, color='black'),
             showlegend=False
         ), row=2, col=1)
         
-        # Add Sharpe result
+        # Add mathematical symbols
         fig.add_trace(go.Scatter(
-            x=[1.5],
-            y=[1],
+            x=[1, 2, 3],
+            y=[1.8, 1.8, 1.8],
             mode='text',
-            text=[f"<b>Sharpe Ratio = {sharpe_details['sharpe_ratio']:.2f}</b>"],
-            textfont=dict(size=18, color='#FF6B35'),
+            text=["−", "÷", "="],
+            textfont=dict(size=24, color='#FF6B35'),
+            showlegend=False
+        ), row=2, col=1)
+        
+        # Add formula explanation
+        fig.add_trace(go.Scatter(
+            x=[2],
+            y=[1.3],
+            mode='text',
+            text=["<b>Sharpe = (Return - Risk-Free) ÷ Risk</b>"],
+            textfont=dict(size=16, color='#2E8B57'),
             showlegend=False
         ), row=2, col=1)
         
         fig.update_layout(
-            height=500,
+            height=600,
             title_text="🎯 Sharpe Ratio Breakdown - Risk-Adjusted Return Measure",
             title_x=0.5,
-            showlegend=False
+            showlegend=False,
+            # Add background shape for formula section
+            shapes=[
+                dict(
+                    type="rect",
+                    xref="x3", yref="y3",
+                    x0=0.1, y0=1.1,
+                    x1=3.9, y1=2.4,
+                    fillcolor="lightblue",
+                    opacity=0.15,
+                    layer="below",
+                    line_width=1,
+                    line_color="lightgray"
+                )
+            ]
         )
         
         fig.update_xaxes(title_text="Components", row=1, col=1)
@@ -358,9 +382,9 @@ class PortfolioAnalyzer:
         fig.update_yaxes(title_text="Return (%)", row=1, col=1)
         fig.update_yaxes(title_text="Value", row=1, col=2)
         
-        # Remove axes for formula subplot
-        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=1)
-        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=1)
+        # Configure formula subplot - make it more visible
+        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, range=[0, 4], row=2, col=1)
+        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, range=[1, 2.5], row=2, col=1)
         
         return fig
 
@@ -1229,22 +1253,23 @@ def main():
                 fig_pie.update_layout(height=300)
                 st.plotly_chart(fig_pie, use_container_width=True)
                 
-                # Top dividend payers table
-                st.subheader("🏆 Top Dividend Payers")
-                top_payers = company_summary.head(8).copy()
-                top_payers['Total_Dividend_Received'] = top_payers['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
-                top_payers['Last_Payment'] = top_payers['Last_Payment'].apply(lambda x: x.strftime('%Y-%m-%d'))
-                
-                st.dataframe(
-                    top_payers[['Symbol', 'Total_Dividend_Received', 'Payment_Count']],
-                    column_config={
-                        "Symbol": "Stock",
-                        "Total_Dividend_Received": "Total",
-                        "Payment_Count": "Payments"
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
+                # Top dividend payers table in expander
+                with st.expander("🏆 View Top Dividend Payers Details", expanded=False):
+                    top_payers = company_summary.head(10).copy()
+                    top_payers['Total_Dividend_Received'] = top_payers['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+                    top_payers['Last_Payment'] = top_payers['Last_Payment'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                    
+                    st.dataframe(
+                        top_payers[['Symbol', 'Total_Dividend_Received', 'Payment_Count', 'Last_Payment']],
+                        column_config={
+                            "Symbol": "Stock",
+                            "Total_Dividend_Received": "Total Received",
+                            "Payment_Count": "# Payments",
+                            "Last_Payment": "Last Payment"
+                        },
+                        use_container_width=True,
+                        hide_index=True
+                    )
             
             # Recent payments table in expander
             with st.expander("🕒 View Recent Dividend Payments Details", expanded=False):
