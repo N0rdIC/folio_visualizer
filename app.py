@@ -134,150 +134,298 @@ class PortfolioAnalyzer:
         
         return metrics
 
-    def calculate_synthesis_metrics(self, portfolio_data: pd.DataFrame, metrics: Dict) -> Dict:
-        """Calculate synthesis metrics for optimization table"""
-        if metrics.get('total_value', 0) == 0:
-            return {
-                'sharpe_ratio': 0,
-                'mean_opportunity_margin': 0,
-                'annualized_total_return': 0,
-                'sector_diversification_score': 0
-            }
+    def calculate_sharpe_details(self, metrics: Dict, portfolio_data: pd.DataFrame) -> Dict:
+        """Calculate detailed Sharpe ratio breakdown for explanation"""
+        risk_free_rate = 0.04  # 4% risk-free rate (10-year Treasury)
         
-        synthesis = {}
+        # Portfolio expected return components
+        dividend_yield = metrics.get('portfolio_dividend_yield', 0) / 100
+        estimated_growth = 0.08  # 8% estimated capital appreciation
+        expected_return = dividend_yield + estimated_growth
         
-        # 1. Sharpe Ratio (estimated)
-        risk_free_rate = 0.04
-        estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08  # Div yield + estimated growth
-        estimated_volatility = metrics['portfolio_beta'] * 0.16  # Market vol * portfolio beta
-        synthesis['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+        # Portfolio risk (volatility) estimation
+        portfolio_beta = metrics.get('portfolio_beta', 1.0)
+        market_volatility = 0.16  # 16% historical S&P 500 volatility
+        portfolio_volatility = portfolio_beta * market_volatility
         
-        # 2. Mean Opportunity Margin (P/E based valuation)
-        valid_pe_data = portfolio_data[portfolio_data['pe_ratio'] > 0]
-        if len(valid_pe_data) > 0:
-            portfolio_weights = valid_pe_data['shares'] * valid_pe_data['current_price']
-            portfolio_weights = portfolio_weights / portfolio_weights.sum()
-            weighted_pe = (valid_pe_data['pe_ratio'] * portfolio_weights).sum()
-            market_pe = 20  # Market average
-            synthesis['mean_opportunity_margin'] = ((market_pe - weighted_pe) / market_pe) * 100
-        else:
-            synthesis['mean_opportunity_margin'] = 0
+        # Sharpe ratio calculation
+        excess_return = expected_return - risk_free_rate
+        sharpe_ratio = excess_return / portfolio_volatility if portfolio_volatility > 0 else 0
         
-        # 3. Annualized Total Return (estimated)
-        dividend_yield = metrics['portfolio_dividend_yield']
-        estimated_price_appreciation = 8  # 8% estimated
-        synthesis['annualized_total_return'] = dividend_yield + estimated_price_appreciation
-        
-        # 4. Sector Diversification Score (explained)
-        sector_allocation = metrics['sector_allocation']
-        num_sectors = len(sector_allocation)
-        
-        # Explanation: Good diversification means:
-        # 1. Multiple sectors (more is better)
-        # 2. No single sector dominates (< 25% each)
-        # 3. Balanced distribution across sectors
-        
-        # Points for number of sectors (0-50 points)
-        sector_points = min(50, num_sectors * 8)  # 8 points per sector, max 50
-        
-        # Penalty for concentration (0-50 penalty)
-        max_sector_weight = sector_allocation['weight'].max() if len(sector_allocation) > 0 else 0
-        concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)  # Penalty if >25% in one sector
-        
-        # Balance score (0-30 points)
-        if num_sectors > 0:
-            ideal_weight = 1.0 / num_sectors  # Perfect balance
-            deviations = abs(sector_allocation['weight'] - ideal_weight)
-            balance_score = max(0, 30 - deviations.sum() * 100)
-        else:
-            balance_score = 0
-        
-        # Total: sector_points (0-50) - concentration_penalty (0-50) + balance_score (0-30) = 0-100
-        synthesis['sector_diversification_score'] = max(0, min(100, sector_points - concentration_penalty + balance_score))
-        
-        return synthesis
+        return {
+            'sharpe_ratio': sharpe_ratio,
+            'risk_free_rate': risk_free_rate,
+            'dividend_yield': dividend_yield,
+            'estimated_growth': estimated_growth,
+            'expected_return': expected_return,
+            'portfolio_beta': portfolio_beta,
+            'market_volatility': market_volatility,
+            'portfolio_volatility': portfolio_volatility,
+            'excess_return': excess_return
+        }
 
-    def calculate_synthesis_metrics_basic(self, portfolio_data: pd.DataFrame, metrics: Dict) -> Dict:
-        """Calculate synthesis metrics without historical performance (fallback)"""
-        if metrics.get('total_value', 0) == 0:
+    def calculate_diversification_details(self, metrics: Dict) -> Dict:
+        """Calculate detailed diversification score breakdown for explanation"""
+        sector_allocation = metrics.get('sector_allocation', pd.DataFrame())
+        
+        if len(sector_allocation) == 0:
             return {
-                'sharpe_ratio': 0,
-                'mean_opportunity_margin': 0,
-                'annualized_total_return': 0,
-                'sector_diversification_score': 0,
-                'data_source': 'insufficient_data'
-            }
-        
-        synthesis = {}
-        
-        # 1. Sharpe Ratio (estimated)
-        risk_free_rate = 0.04
-        estimated_return = metrics.get('portfolio_dividend_yield', 0) / 100 + 0.08
-        estimated_volatility = metrics.get('portfolio_beta', 1) * 0.16
-        synthesis['sharpe_ratio'] = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
-        
-        # 2. Mean Opportunity Margin
-        valid_pe_data = portfolio_data[portfolio_data['pe_ratio'] > 0]
-        if len(valid_pe_data) > 0:
-            portfolio_weights = valid_pe_data['shares'] * valid_pe_data['current_price']
-            portfolio_weights = portfolio_weights / portfolio_weights.sum()
-            weighted_pe = (valid_pe_data['pe_ratio'] * portfolio_weights).sum()
-            market_pe = 20
-            synthesis['mean_opportunity_margin'] = ((market_pe - weighted_pe) / market_pe) * 100
-        else:
-            synthesis['mean_opportunity_margin'] = 0
-        
-        # 3. Annualized Total Return (estimated only)
-        dividend_yield = metrics.get('portfolio_dividend_yield', 0)
-        estimated_price_appreciation = 8
-        synthesis['annualized_total_return'] = dividend_yield + estimated_price_appreciation
-        synthesis['data_source'] = 'estimated'
-        
-        # 4. Sector Diversification Score
-        try:
-            sector_allocation = metrics.get('sector_allocation', pd.DataFrame())
-            num_sectors = len(sector_allocation)
-            
-            sector_points = min(50, num_sectors * 8)
-            
-            if len(sector_allocation) > 0:
-                max_sector_weight = sector_allocation['weight'].max()
-                concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)
-            else:
-                max_sector_weight = 0
-                concentration_penalty = 0
-            
-            if num_sectors > 0:
-                ideal_weight = 1.0 / num_sectors
-                deviations = abs(sector_allocation['weight'] - ideal_weight)
-                balance_score = max(0, 30 - deviations.sum() * 100)
-            else:
-                balance_score = 0
-            
-            final_score = sector_points - concentration_penalty + balance_score
-            synthesis['sector_diversification_score'] = max(0, min(100, final_score))
-            
-            synthesis['diversification_breakdown'] = {
-                'num_sectors': num_sectors,
-                'sector_points': sector_points,
-                'max_sector_weight': max_sector_weight * 100,
-                'concentration_penalty': concentration_penalty,
-                'balance_score': balance_score,
-                'final_score': final_score
-            }
-            
-        except Exception:
-            synthesis['sector_diversification_score'] = 0
-            synthesis['diversification_breakdown'] = {
+                'diversification_score': 0,
                 'num_sectors': 0,
                 'sector_points': 0,
                 'max_sector_weight': 0,
                 'concentration_penalty': 0,
                 'balance_score': 0,
-                'final_score': 0
+                'sector_breakdown': pd.DataFrame()
             }
         
-        return synthesis
+        num_sectors = len(sector_allocation)
+        
+        # Component 1: Number of sectors (0-50 points)
+        sector_points = min(50, num_sectors * 8)  # 8 points per sector, max 50
+        
+        # Component 2: Concentration penalty (0-50 penalty)
+        max_sector_weight = sector_allocation['weight'].max()
+        concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)  # Penalty if >25%
+        
+        # Component 3: Balance score (0-30 points)
+        ideal_weight = 1.0 / num_sectors  # Perfect equal distribution
+        deviations = abs(sector_allocation['weight'] - ideal_weight)
+        balance_score = max(0, 30 - deviations.sum() * 100)
+        
+        # Final score (0-100)
+        diversification_score = max(0, min(100, sector_points - concentration_penalty + balance_score))
+        
+        # Create sector breakdown for visualization
+        sector_breakdown = sector_allocation.copy()
+        sector_breakdown['weight_pct'] = sector_breakdown['weight'] * 100
+        sector_breakdown['ideal_weight_pct'] = ideal_weight * 100
+        sector_breakdown['deviation'] = abs(sector_breakdown['weight'] - ideal_weight) * 100
+        sector_breakdown = sector_breakdown.sort_values('weight', ascending=False)
+        
+        return {
+            'diversification_score': diversification_score,
+            'num_sectors': num_sectors,
+            'sector_points': sector_points,
+            'max_sector_weight': max_sector_weight,
+            'concentration_penalty': concentration_penalty,
+            'balance_score': balance_score,
+            'ideal_weight': ideal_weight,
+            'sector_breakdown': sector_breakdown
+        }
+
+    def create_sharpe_infographic(self, sharpe_details: Dict):
+        """Create visual explanation of Sharpe ratio calculation"""
+        
+        # Create infographic with plotly
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "📊 Expected Return Components",
+                "⚡ Risk (Volatility) Components", 
+                "🎯 Sharpe Ratio Formula",
+                "📈 Risk-Return Profile"
+            ),
+            specs=[[{"type": "bar"}, {"type": "bar"}],
+                   [{"colspan": 2}, None]],
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1
+        )
+        
+        # Expected Return breakdown
+        return_components = ['Dividend Yield', 'Est. Growth', 'Total Expected']
+        return_values = [
+            sharpe_details['dividend_yield'] * 100,
+            sharpe_details['estimated_growth'] * 100,
+            sharpe_details['expected_return'] * 100
+        ]
+        colors_return = ['#2E8B57', '#4682B4', '#228B22']
+        
+        fig.add_trace(go.Bar(
+            x=return_components,
+            y=return_values,
+            marker_color=colors_return,
+            text=[f"{v:.1f}%" for v in return_values],
+            textposition='auto',
+            name="Expected Return"
+        ), row=1, col=1)
+        
+        # Risk breakdown
+        risk_components = ['Market Vol', 'Portfolio Beta', 'Portfolio Vol']
+        risk_values = [
+            sharpe_details['market_volatility'] * 100,
+            sharpe_details['portfolio_beta'],
+            sharpe_details['portfolio_volatility'] * 100
+        ]
+        colors_risk = ['#DC143C', '#FF6347', '#B22222']
+        
+        fig.add_trace(go.Bar(
+            x=risk_components,
+            y=risk_values,
+            marker_color=colors_risk,
+            text=[f"{v:.1f}{'%' if 'Vol' in risk_components[i] else ''}" for i, v in enumerate(risk_values)],
+            textposition='auto',
+            name="Risk Components"
+        ), row=1, col=2)
+        
+        # Sharpe formula visualization
+        fig.add_trace(go.Scatter(
+            x=[0, 1, 2, 3],
+            y=[2, 2, 2, 2],
+            mode='text',
+            text=[
+                f"Expected Return<br>{sharpe_details['expected_return']*100:.1f}%",
+                "−",
+                f"Risk-Free Rate<br>{sharpe_details['risk_free_rate']*100:.1f}%",
+                f"÷ Portfolio Risk<br>{sharpe_details['portfolio_volatility']*100:.1f}%"
+            ],
+            textfont=dict(size=14),
+            showlegend=False
+        ), row=2, col=1)
+        
+        # Add Sharpe result
+        fig.add_trace(go.Scatter(
+            x=[1.5],
+            y=[1],
+            mode='text',
+            text=[f"<b>Sharpe Ratio = {sharpe_details['sharpe_ratio']:.2f}</b>"],
+            textfont=dict(size=18, color='#FF6B35'),
+            showlegend=False
+        ), row=2, col=1)
+        
+        fig.update_layout(
+            height=500,
+            title_text="🎯 Sharpe Ratio Breakdown - Risk-Adjusted Return Measure",
+            title_x=0.5,
+            showlegend=False
+        )
+        
+        fig.update_xaxes(title_text="Components", row=1, col=1)
+        fig.update_xaxes(title_text="Risk Factors", row=1, col=2)
+        fig.update_yaxes(title_text="Return (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Value", row=1, col=2)
+        
+        # Remove axes for formula subplot
+        fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=1)
+        fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False, row=2, col=1)
+        
+        return fig
+
+    def create_diversification_infographic(self, div_details: Dict):
+        """Create visual explanation of diversification score calculation"""
+        
+        if div_details['num_sectors'] == 0:
+            # Empty portfolio case
+            fig = go.Figure()
+            fig.add_annotation(
+                text="No sectors found in portfolio",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=20)
+            )
+            fig.update_layout(height=400, title="Sector Diversification Analysis")
+            return fig
+        
+        # Create comprehensive diversification visualization
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "🏗️ Sector Count Score (Max 50 pts)",
+                "⚠️ Concentration Penalty", 
+                "⚖️ Balance Score (Max 30 pts)",
+                "🎯 Final Diversification Score"
+            ),
+            specs=[
+                [{"type": "bar"}, {"type": "bar"}],
+                [{"type": "bar"}, {"type": "indicator"}]
+            ],
+            vertical_spacing=0.15
+        )
+        
+        # 1. Sector count visualization
+        sector_count_data = pd.DataFrame({
+            'Category': ['Current Sectors', 'Points Earned', 'Max Possible'],
+            'Value': [div_details['num_sectors'], div_details['sector_points'], 50],
+            'Color': ['#3498db', '#2ecc71', '#95a5a6']
+        })
+        
+        fig.add_trace(go.Bar(
+            x=sector_count_data['Category'],
+            y=sector_count_data['Value'],
+            marker_color=sector_count_data['Color'],
+            text=sector_count_data['Value'],
+            textposition='auto',
+            name="Sector Points"
+        ), row=1, col=1)
+        
+        # 2. Concentration analysis
+        max_weight_pct = div_details['max_sector_weight'] * 100
+        penalty = div_details['concentration_penalty']
+        
+        concentration_data = pd.DataFrame({
+            'Category': ['Max Sector Weight', 'Threshold (25%)', 'Penalty Applied'],
+            'Value': [max_weight_pct, 25, penalty],
+            'Color': ['#e74c3c' if max_weight_pct > 25 else '#2ecc71', '#f39c12', '#e74c3c']
+        })
+        
+        fig.add_trace(go.Bar(
+            x=concentration_data['Category'],
+            y=concentration_data['Value'],
+            marker_color=concentration_data['Color'],
+            text=[f"{v:.1f}%" if i < 2 else f"{v:.0f} pts" for i, v in enumerate(concentration_data['Value'])],
+            textposition='auto',
+            name="Concentration"
+        ), row=1, col=2)
+        
+        # 3. Balance score visualization
+        balance_data = pd.DataFrame({
+            'Category': ['Balance Points', 'Max Possible'],
+            'Value': [div_details['balance_score'], 30],
+            'Color': ['#9b59b6', '#95a5a6']
+        })
+        
+        fig.add_trace(go.Bar(
+            x=balance_data['Category'],
+            y=balance_data['Value'],
+            marker_color=balance_data['Color'],
+            text=balance_data['Value'],
+            textposition='auto',
+            name="Balance"
+        ), row=2, col=1)
+        
+        # 4. Final score gauge
+        score = div_details['diversification_score']
+        color = '#2ecc71' if score >= 70 else '#f39c12' if score >= 40 else '#e74c3c'
+        
+        fig.add_trace(go.Indicator(
+            mode="gauge+number+delta",
+            value=score,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "Final Score"},
+            gauge={
+                'axis': {'range': [None, 100]},
+                'bar': {'color': color},
+                'steps': [
+                    {'range': [0, 40], 'color': "#ffcccc"},
+                    {'range': [40, 70], 'color': "#fff3cd"},
+                    {'range': [70, 100], 'color': "#d4edda"}
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 90
+                }
+            }
+        ), row=2, col=2)
+        
+        fig.update_layout(
+            height=600,
+            title_text="🎯 Sector Diversification Score Breakdown",
+            title_x=0.5,
+            showlegend=False
+        )
+        
+        return fig
 
     def simulate_historical_performance(self, portfolio_holdings: List[Dict], years: int = 3, show_dividend_details: bool = False) -> pd.DataFrame:
         """Simulate historical portfolio performance with total return (price + dividends)"""
@@ -708,15 +856,13 @@ def main():
     
     # Analysis settings
     st.sidebar.subheader("⚙️ Settings")
-    analysis_period = st.sidebar.selectbox("Historical Period", ["1y", "2y", "3y", "5y"], index=2)
+    analysis_period = st.sidebar.selectbox("Historical Period", ["1y", "2y", "3y", "5y", "10y"], index=2)
     show_dividend_details = st.sidebar.checkbox("Show Dividend Details", value=False)
     
     # MAIN ANALYSIS
     portfolio_holdings = st.session_state.holdings
     
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
-        
-        st.info(f"Analyzing {len(portfolio_holdings)} holdings...")
         
         # Fetch data
         portfolio_data = []
@@ -745,8 +891,7 @@ def main():
         # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
-        # Calculate historical performance FIRST
-        st.info("📊 Calculating historical performance...")
+        # Calculate historical performance
         years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
         
         with st.spinner("Calculating historical performance..."):
@@ -770,30 +915,29 @@ def main():
         with col4:
             st.metric("Portfolio Beta", f"{metrics['portfolio_beta']:.2f}")
         
-        # Holdings table
-        st.subheader("📋 Holdings")
-        
-        display_df = portfolio_df.copy()
-        display_df['Value'] = display_df['shares'] * display_df['current_price']
-        display_df['Weight %'] = (display_df['Value'] / metrics['total_value']) * 100
-        display_df['Annual Div'] = display_df['shares'] * display_df['dividend_rate']
-        
-        st.dataframe(
-            display_df[['symbol', 'name', 'sector', 'shares', 'current_price', 'Value', 'Weight %', 'dividend_yield', 'Annual Div']],
-            column_config={
-                "symbol": "Symbol",
-                "name": "Company",
-                "sector": "Sector", 
-                "shares": "Shares",
-                "current_price": st.column_config.NumberColumn("Price", format="$%.2f"),
-                "Value": st.column_config.NumberColumn("Value", format="$%.2f"),
-                "Weight %": st.column_config.NumberColumn("Weight %", format="%.1f%%"),
-                "dividend_yield": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
-                "Annual Div": st.column_config.NumberColumn("Annual Div", format="$%.2f")
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+        # Holdings table (optional - in expander)
+        with st.expander("📋 View Detailed Holdings", expanded=False):
+            display_df = portfolio_df.copy()
+            display_df['Value'] = display_df['shares'] * display_df['current_price']
+            display_df['Weight %'] = (display_df['Value'] / metrics['total_value']) * 100
+            display_df['Annual Div'] = display_df['shares'] * display_df['dividend_rate']
+            
+            st.dataframe(
+                display_df[['symbol', 'name', 'sector', 'shares', 'current_price', 'Value', 'Weight %', 'dividend_yield', 'Annual Div']],
+                column_config={
+                    "symbol": "Symbol",
+                    "name": "Company",
+                    "sector": "Sector", 
+                    "shares": "Shares",
+                    "current_price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                    "Value": st.column_config.NumberColumn("Value", format="$%.2f"),
+                    "Weight %": st.column_config.NumberColumn("Weight %", format="%.1f%%"),
+                    "dividend_yield": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
+                    "Annual Div": st.column_config.NumberColumn("Annual Div", format="$%.2f")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
         
         # Visualizations
         st.subheader("📈 Analysis")
@@ -827,14 +971,6 @@ def main():
         # Historical Performance Analysis
         st.header("📈 Historical Performance Analysis")
         st.info("💡 **Total Return** includes both price appreciation AND dividend reinvestment")
-        
-        with st.spinner("Calculating historical performance..."):
-            years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
-            historical_performance = analyzer.simulate_historical_performance(
-                portfolio_holdings, 
-                years=years,
-                show_dividend_details=show_dividend_details
-            )
         
         if not historical_performance.empty:
             # Performance chart with both total return and price-only return
@@ -960,37 +1096,7 @@ def main():
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.subheader("📊 Daily Dividend Payments")
-                
-                if not daily_dividends.empty:
-                    fig_daily = go.Figure()
-                    
-                    fig_daily.add_trace(go.Bar(
-                        x=daily_dividends['Date'],
-                        y=daily_dividends['Total_Dividend_Received'],
-                        text=daily_dividends['Companies'],
-                        textposition='outside',
-                        hovertemplate='<br>'.join([
-                            'Date: %{x}',
-                            'Dividend: $%{y:.2f}',
-                            'Companies: %{text}',
-                            '<extra></extra>'
-                        ]),
-                        marker_color='green',
-                        name='Daily Dividends'
-                    ))
-                    
-                    fig_daily.update_layout(
-                        title="Daily Dividend Payments - Last 12 Months",
-                        xaxis_title="Date",
-                        yaxis_title="Dividend Amount ($)",
-                        height=400,
-                        showlegend=False
-                    )
-                    
-                    st.plotly_chart(fig_daily, use_container_width=True)
-                
-                # Monthly aggregation chart
+                # Monthly aggregation chart (main chart)
                 if not monthly_dividends.empty:
                     st.subheader("📈 Monthly Dividend Summary")
                     
@@ -1009,11 +1115,41 @@ def main():
                         title="Monthly Dividend Income",
                         xaxis_title="Month",
                         yaxis_title="Dividend Amount ($)",
-                        height=300,
+                        height=400,
                         showlegend=False
                     )
                     
                     st.plotly_chart(fig_monthly, use_container_width=True)
+                
+                # Daily dividends in expander
+                with st.expander("📊 View Daily Dividend Payments", expanded=False):
+                    if not daily_dividends.empty:
+                        fig_daily = go.Figure()
+                        
+                        fig_daily.add_trace(go.Bar(
+                            x=daily_dividends['Date'],
+                            y=daily_dividends['Total_Dividend_Received'],
+                            text=daily_dividends['Companies'],
+                            textposition='outside',
+                            hovertemplate='<br>'.join([
+                                'Date: %{x}',
+                                'Dividend: $%{y:.2f}',
+                                'Companies: %{text}',
+                                '<extra></extra>'
+                            ]),
+                            marker_color='green',
+                            name='Daily Dividends'
+                        ))
+                        
+                        fig_daily.update_layout(
+                            title="Daily Dividend Payments - Last 12 Months",
+                            xaxis_title="Date",
+                            yaxis_title="Dividend Amount ($)",
+                            height=400,
+                            showlegend=False
+                        )
+                        
+                        st.plotly_chart(fig_daily, use_container_width=True)
             
             with col2:
                 st.subheader("🏢 Dividend by Company")
@@ -1057,26 +1193,26 @@ def main():
                     hide_index=True
                 )
             
-            # Recent payments table
-            st.subheader("🕒 Recent Dividend Payments")
-            display_history = dividend_history.copy()
-            display_history['Date'] = display_history['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
-            display_history['Dividend_Per_Share'] = display_history['Dividend_Per_Share'].apply(lambda x: f"${x:.4f}")
-            display_history['Total_Dividend_Received'] = display_history['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
-            display_history = display_history.sort_values('Date', ascending=False)
-            
-            recent_payments = display_history.head(10)
-            st.dataframe(
-                recent_payments[['Date', 'Symbol', 'Dividend_Per_Share', 'Total_Dividend_Received']],
-                column_config={
-                    "Date": "Date",
-                    "Symbol": "Stock",
-                    "Dividend_Per_Share": "Per Share", 
-                    "Total_Dividend_Received": "Amount"
-                },
-                use_container_width=True,
-                hide_index=True
-            )
+            # Recent payments table in expander
+            with st.expander("🕒 View Recent Dividend Payments Details", expanded=False):
+                display_history = dividend_history.copy()
+                display_history['Date'] = display_history['Date'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                display_history['Dividend_Per_Share'] = display_history['Dividend_Per_Share'].apply(lambda x: f"${x:.4f}")
+                display_history['Total_Dividend_Received'] = display_history['Total_Dividend_Received'].apply(lambda x: f"${x:.2f}")
+                display_history = display_history.sort_values('Date', ascending=False)
+                
+                recent_payments = display_history.head(15)
+                st.dataframe(
+                    recent_payments[['Date', 'Symbol', 'Dividend_Per_Share', 'Total_Dividend_Received']],
+                    column_config={
+                        "Date": "Date",
+                        "Symbol": "Stock",
+                        "Dividend_Per_Share": "Per Share", 
+                        "Total_Dividend_Received": "Amount"
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
         
         else:
             st.warning("No dividend payments found in the last 12 months for this portfolio.")
@@ -1085,9 +1221,13 @@ def main():
             st.write("• Dividend payments are outside the 12-month window")
             st.write("• Try including dividend-paying stocks (e.g., KO, JNJ, PG)")
         
-        # 🎯 SYNTHESIS TABLE (AT THE END WITH ACTUAL DATA)
+        # 🎯 SYNTHESIS TABLE (AT THE END WITH ACTUAL DATA AND DETAILED EXPLANATIONS)
         st.header("🎯 Portfolio Synthesis Metrics")
         st.info("📊 **Final synthesis using actual calculated values from analysis above**")
+        
+        # Calculate detailed breakdowns for both metrics
+        sharpe_details = analyzer.calculate_sharpe_details(metrics, portfolio_df)
+        div_details = analyzer.calculate_diversification_details(metrics)
         
         # Get actual annualized return from historical performance if available
         actual_annual_return_for_synthesis = None
@@ -1098,12 +1238,7 @@ def main():
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            # Calculate Sharpe ratio
-            risk_free_rate = 0.04
-            estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08
-            estimated_volatility = metrics['portfolio_beta'] * 0.16
-            sharpe_ratio = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
-            
+            sharpe_ratio = sharpe_details['sharpe_ratio']
             sharpe_color = "🟢" if sharpe_ratio > 1.0 else "🟡" if sharpe_ratio > 0.5 else "🔴"
             st.metric(
                 "Sharpe Coefficient", 
@@ -1159,27 +1294,7 @@ def main():
             )
         
         with col5:
-            # Calculate sector diversification score
-            sector_allocation = metrics['sector_allocation']
-            num_sectors = len(sector_allocation)
-            sector_points = min(50, num_sectors * 8)
-            
-            if len(sector_allocation) > 0:
-                max_sector_weight = sector_allocation['weight'].max()
-                concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)
-            else:
-                max_sector_weight = 0
-                concentration_penalty = 0
-            
-            if num_sectors > 0:
-                ideal_weight = 1.0 / num_sectors
-                deviations = abs(sector_allocation['weight'] - ideal_weight)
-                balance_score = max(0, 30 - deviations.sum() * 100)
-            else:
-                balance_score = 0
-            
-            diversification_score = max(0, min(100, sector_points - concentration_penalty + balance_score))
-            
+            diversification_score = div_details['diversification_score']
             div_color = "🟢" if diversification_score > 70 else "🟡" if diversification_score > 40 else "🔴"
             st.metric(
                 "Sector Diversification", 
@@ -1187,24 +1302,141 @@ def main():
                 help="Sector balance: More sectors + balanced allocation + no concentration >25%"
             )
         
+        # DETAILED METRIC EXPLANATIONS WITH INFOGRAPHICS
+        st.header("📋 Detailed Metric Explanations")
+        
+        # Create tabs for detailed explanations
+        tab1, tab2 = st.tabs(["🎯 Sharpe Coefficient Breakdown", "🎯 Diversification Score Breakdown"])
+        
+        with tab1:
+            st.subheader("📊 Sharpe Ratio: Risk-Adjusted Return Analysis")
+            
+            # Create and display Sharpe infographic
+            sharpe_fig = analyzer.create_sharpe_infographic(sharpe_details)
+            st.plotly_chart(sharpe_fig, use_container_width=True)
+            
+            # Detailed explanation
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### 📈 **Return Components**")
+                st.write(f"• **Dividend Yield**: {sharpe_details['dividend_yield']*100:.1f}% (actual portfolio yield)")
+                st.write(f"• **Est. Growth**: {sharpe_details['estimated_growth']*100:.1f}% (capital appreciation estimate)")
+                st.write(f"• **Total Expected Return**: {sharpe_details['expected_return']*100:.1f}%")
+                st.write(f"• **Risk-Free Rate**: {sharpe_details['risk_free_rate']*100:.1f}% (10-year Treasury)")
+                st.write(f"• **Excess Return**: {sharpe_details['excess_return']*100:.1f}% (premium over risk-free)")
+            
+            with col2:
+                st.markdown("### ⚡ **Risk Components**")
+                st.write(f"• **Portfolio Beta**: {sharpe_details['portfolio_beta']:.2f} (vs S&P 500)")
+                st.write(f"• **Market Volatility**: {sharpe_details['market_volatility']*100:.0f}% (historical S&P 500)")
+                st.write(f"• **Portfolio Volatility**: {sharpe_details['portfolio_volatility']*100:.1f}% (beta-adjusted)")
+                
+                st.markdown("### 🎯 **Final Calculation**")
+                st.write(f"**Sharpe = ({sharpe_details['expected_return']*100:.1f}% - {sharpe_details['risk_free_rate']*100:.1f}%) ÷ {sharpe_details['portfolio_volatility']*100:.1f}%**")
+                st.write(f"**= {sharpe_details['sharpe_ratio']:.2f}**")
+            
+            # Interpretation guide
+            st.markdown("---")
+            st.markdown("### 🔍 **Sharpe Ratio Interpretation Guide**")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**🔴 Poor (< 0.5)**")
+                st.write("• Low return for risk taken")
+                st.write("• Consider lower-risk alternatives")
+                st.write("• May indicate poor stock selection")
+            
+            with col2:
+                st.markdown("**🟡 Acceptable (0.5 - 1.0)**")
+                st.write("• Reasonable risk-adjusted return")
+                st.write("• Room for improvement")
+                st.write("• Monitor and optimize")
+            
+            with col3:
+                st.markdown("**🟢 Excellent (> 1.0)**")
+                st.write("• Strong risk-adjusted performance")
+                st.write("• Efficient portfolio allocation")
+                st.write("• Above-average risk management")
+        
+        with tab2:
+            st.subheader("🎯 Sector Diversification: Balance and Risk Distribution")
+            
+            # Create and display diversification infographic
+            div_fig = analyzer.create_diversification_infographic(div_details)
+            st.plotly_chart(div_fig, use_container_width=True)
+            
+            # Detailed breakdown
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### 🏗️ **Score Components**")
+                st.write(f"• **Number of Sectors**: {div_details['num_sectors']} sectors")
+                st.write(f"• **Sector Points**: {div_details['sector_points']:.0f}/50 (8 pts per sector)")
+                st.write(f"• **Concentration Penalty**: -{div_details['concentration_penalty']:.0f} pts")
+                st.write(f"• **Balance Bonus**: +{div_details['balance_score']:.0f}/30 pts")
+                st.write(f"• **Final Score**: {div_details['diversification_score']:.0f}/100")
+            
+            with col2:
+                st.markdown("### ⚖️ **Balance Analysis**")
+                if div_details['num_sectors'] > 0:
+                    st.write(f"• **Ideal Weight per Sector**: {div_details['ideal_weight']*100:.1f}%")
+                    st.write(f"• **Largest Sector Weight**: {div_details['max_sector_weight']*100:.1f}%")
+                    
+                    if div_details['max_sector_weight'] > 0.25:
+                        st.warning(f"⚠️ Concentration risk: Largest sector > 25%")
+                    else:
+                        st.success(f"✅ Good balance: No sector > 25%")
+                else:
+                    st.write("• No sector data available")
+            
+            # Sector breakdown table
+            if len(div_details['sector_breakdown']) > 0:
+                st.markdown("### 📊 **Sector Weight Analysis**")
+                sector_df = div_details['sector_breakdown'].copy()
+                sector_df = sector_df.reset_index()
+                
+                st.dataframe(
+                    sector_df[['sector', 'weight_pct', 'ideal_weight_pct', 'deviation']],
+                    column_config={
+                        "sector": "Sector",
+                        "weight_pct": st.column_config.NumberColumn("Current %", format="%.1f%%"),
+                        "ideal_weight_pct": st.column_config.NumberColumn("Ideal %", format="%.1f%%"),
+                        "deviation": st.column_config.NumberColumn("Deviation", format="%.1f%%")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+            
+            # Improvement suggestions
+            st.markdown("---")
+            st.markdown("### 💡 **Diversification Improvement Guide**")
+            
+            suggestions = []
+            if div_details['num_sectors'] < 5:
+                suggestions.append("🔹 **Add more sectors** - Target 6+ sectors for better diversification")
+            
+            if div_details['max_sector_weight'] > 0.3:
+                max_sector = div_details['sector_breakdown']['weight_pct'].idxmax() if len(div_details['sector_breakdown']) > 0 else "Unknown"
+                suggestions.append(f"🔹 **Reduce concentration** - Largest sector ({max_sector}) > 30%")
+            
+            if div_details['balance_score'] < 15:
+                suggestions.append("🔹 **Rebalance allocation** - Move toward more equal sector weights")
+            
+            if div_details['diversification_score'] < 50:
+                suggestions.append("🔹 **Overall improvement needed** - Consider major portfolio restructuring")
+            
+            if suggestions:
+                for suggestion in suggestions:
+                    st.write(suggestion)
+            else:
+                st.success("✅ **Excellent diversification!** Your portfolio shows strong sector balance.")
+        
         # Show confirmation of data source
         if actual_annual_return_for_synthesis is not None:
             st.success(f"📊 **Annualized return uses actual data from curves**: {actual_annual_return_for_synthesis:.1f}% (matches performance summary above)")
         else:
             st.warning("📈 **Annualized return estimated** - no historical performance data available")
-        
-        # Sector breakdown
-        if len(sector_allocation) > 0:
-            max_sector = sector_allocation['weight'].idxmax()
-            max_weight = sector_allocation['weight'].max() * 100
-            
-            st.info(f"""
-            **🎯 Sector Diversification Breakdown:**
-            • **Sectors**: {num_sectors} sectors → {sector_points:.0f}/50 points (8 points per sector, max 50)
-            • **Concentration**: Largest sector {max_sector} ({max_weight:.1f}%) → -{concentration_penalty:.0f} penalty (penalty if >25%)
-            • **Balance**: Distribution balance → +{balance_score:.0f}/30 points
-            • **Final Score**: {sector_points:.0f} - {concentration_penalty:.0f} + {balance_score:.0f} = {diversification_score:.0f}/100
-            """)
         
         # Final optimization insights
         insights = []
@@ -1243,16 +1475,16 @@ def main():
             # Export synthesis metrics
             synthesis_data = pd.DataFrame([{
                 'Metric': 'Sharpe Coefficient',
-                'Value': f"{synthesis_metrics['sharpe_ratio']:.2f}"
+                'Value': f"{sharpe_details['sharpe_ratio']:.2f}"
             }, {
                 'Metric': 'Mean Opportunity Margin (%)',
-                'Value': f"{synthesis_metrics['mean_opportunity_margin']:+.1f}"
+                'Value': f"{opportunity_margin:+.1f}"
             }, {
                 'Metric': 'Annualized Total Return (%)',
-                'Value': f"{synthesis_metrics['annualized_total_return']:.1f}"
+                'Value': f"{annual_return_display:.1f}"
             }, {
                 'Metric': 'Sector Diversification Score',
-                'Value': f"{synthesis_metrics['sector_diversification_score']:.0f}"
+                'Value': f"{diversification_score:.0f}"
             }])
             
             synthesis_csv = synthesis_data.to_csv(index=False)
@@ -1277,6 +1509,14 @@ def main():
         - **Annualized Total Return**: Actual return from historical curves (with dividends reinvested)
         - **Dividend Yield**: Current annual dividend income as % of portfolio value
         - **Sector Diversification**: Portfolio balance score (0-100)
+        
+        **Sharpe Coefficient Explained:**
+        - **Formula**: (Expected Return - Risk-Free Rate) ÷ Portfolio Volatility
+        - **Expected Return**: Portfolio dividend yield + estimated 8% growth
+        - **Risk-Free Rate**: 4% (10-year Treasury benchmark)
+        - **Portfolio Volatility**: Portfolio beta × 16% market volatility
+        - **Good Score (>1.0)**: Excellent risk-adjusted returns
+        - **Poor Score (<0.5)**: Low returns for risk taken
         
         **Sector Diversification Explained:**
         - **Score Components**: Number of sectors (more is better) + Balance (avoid concentration >25%) + Equal distribution
