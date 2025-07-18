@@ -761,18 +761,11 @@ def main():
         if not historical_performance.empty and len(historical_performance) > 1:
             total_return = historical_performance['Total_Return'].iloc[-1]
             actual_annual_return = ((1 + total_return/100) ** (1/years) - 1) * 100
+            # Add it to metrics for synthesis calculation
+            metrics['actual_annual_return'] = actual_annual_return
         
         # Now calculate synthesis metrics with actual data
-        try:
-            synthesis_metrics = analyzer.calculate_synthesis_metrics(
-                portfolio_df, 
-                metrics, 
-                actual_annual_return
-            )
-        except Exception as e:
-            st.warning(f"Error with synthesis calculation: {str(e)}")
-            # Fallback to basic calculation
-            synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
+        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
         
         # 🎯 SYNTHESIS TABLE (NOW WITH ACTUAL DATA)
         st.header("🎯 Portfolio Synthesis Metrics")
