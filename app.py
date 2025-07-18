@@ -1064,7 +1064,8 @@ def main():
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
         # Calculate historical performance
-        years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
+        years_str = analysis_period.rstrip('y')  # Remove 'y' suffix
+        years = int(years_str) if years_str.isdigit() else 3
         
         with st.spinner("Calculating historical performance..."):
             historical_performance = analyzer.simulate_historical_performance(
