@@ -213,6 +213,101 @@ class PortfolioAnalyzer:
             'volatility_annualized_pct': portfolio_volatility * 100
         }
 
+    def identify_problematic_stocks(self, portfolio_df: pd.DataFrame, metrics: Dict, historical_performance: pd.DataFrame = None) -> pd.DataFrame:
+        """Identify stocks that may be problematic for portfolio optimization"""
+        
+        if portfolio_df.empty:
+            return pd.DataFrame()
+        
+        analysis_df = portfolio_df.copy()
+        total_value = metrics.get('total_value', 1)
+        
+        # Calculate weights
+        analysis_df['weight'] = (analysis_df['shares'] * analysis_df['current_price']) / total_value
+        analysis_df['problem_score'] = 0
+        analysis_df['issues'] = ''
+        
+        # 1. Valuation Issues (P/E Ratio)
+        market_pe = 20  # Market average P/E
+        for idx, row in analysis_df.iterrows():
+            pe_ratio = row['pe_ratio']
+            if pe_ratio > 0:
+                if pe_ratio > market_pe * 1.5:  # 50% above market
+                    analysis_df.loc[idx, 'problem_score'] += 25
+                    analysis_df.loc[idx, 'issues'] += f"Overvalued (P/E: {pe_ratio:.1f}); "
+                elif pe_ratio > market_pe * 1.2:  # 20% above market
+                    analysis_df.loc[idx, 'problem_score'] += 15
+                    analysis_df.loc[idx, 'issues'] += f"High P/E ({pe_ratio:.1f}); "
+        
+        # 2. Risk Issues (Beta)
+        for idx, row in analysis_df.iterrows():
+            beta = row['beta']
+            if beta > 1.5:
+                analysis_df.loc[idx, 'problem_score'] += 20
+                analysis_df.loc[idx, 'issues'] += f"High Risk (β: {beta:.2f}); "
+            elif beta > 1.3:
+                analysis_df.loc[idx, 'problem_score'] += 10
+                analysis_df.loc[idx, 'issues'] += f"Above-Avg Risk (β: {beta:.2f}); "
+        
+        # 3. Poor Dividend Performance (for dividend-focused portfolios)
+        portfolio_avg_yield = metrics.get('portfolio_dividend_yield', 0)
+        if portfolio_avg_yield > 1:  # Only penalize if portfolio focuses on dividends
+            for idx, row in analysis_df.iterrows():
+                div_yield = row['dividend_yield']
+                if div_yield < portfolio_avg_yield * 0.5:  # Less than half portfolio average
+                    analysis_df.loc[idx, 'problem_score'] += 15
+                    analysis_df.loc[idx, 'issues'] += f"Low Dividend ({div_yield:.1f}%); "
+        
+        # 4. Concentration Issues
+        sector_allocation = analysis_df.groupby('sector')['weight'].sum()
+        for idx, row in analysis_df.iterrows():
+            sector = row['sector']
+            sector_total = sector_allocation.get(sector, 0)
+            if sector_total > 0.35:  # Sector >35% of portfolio
+                analysis_df.loc[idx, 'problem_score'] += 20
+                analysis_df.loc[idx, 'issues'] += f"Over-Concentrated Sector ({sector_total*100:.1f}%); "
+            elif sector_total > 0.25:  # Sector >25% of portfolio
+                analysis_df.loc[idx, 'problem_score'] += 10
+                analysis_df.loc[idx, 'issues'] += f"High Sector Concentration ({sector_total*100:.1f}%); "
+        
+        # 5. Individual Position Size Issues
+        for idx, row in analysis_df.iterrows():
+            weight = row['weight']
+            if weight > 0.15:  # Single stock >15%
+                analysis_df.loc[idx, 'problem_score'] += 25
+                analysis_df.loc[idx, 'issues'] += f"Over-Sized Position ({weight*100:.1f}%); "
+            elif weight > 0.10:  # Single stock >10%
+                analysis_df.loc[idx, 'problem_score'] += 15
+                analysis_df.loc[idx, 'issues'] += f"Large Position ({weight*100:.1f}%); "
+        
+        # 6. Zero Dividend (for income portfolios)
+        if portfolio_avg_yield > 2:  # Income-focused portfolio
+            for idx, row in analysis_df.iterrows():
+                if row['dividend_yield'] == 0:
+                    analysis_df.loc[idx, 'problem_score'] += 10
+                    analysis_df.loc[idx, 'issues'] += "No Dividend; "
+        
+        # 7. Market Cap Issues (very small or unknown companies)
+        for idx, row in analysis_df.iterrows():
+            market_cap = row['market_cap']
+            if market_cap > 0 and market_cap < 1e9:  # Less than $1B market cap
+                analysis_df.loc[idx, 'problem_score'] += 10
+                analysis_df.loc[idx, 'issues'] += f"Small Cap Risk (<$1B); "
+        
+        # Clean up issues string
+        analysis_df['issues'] = analysis_df['issues'].str.rstrip('; ')
+        
+        # Filter and sort by problem score
+        problematic = analysis_df[analysis_df['problem_score'] > 0].copy()
+        problematic = problematic.sort_values('problem_score', ascending=False)
+        
+        # Add severity level
+        problematic['severity'] = problematic['problem_score'].apply(
+            lambda x: '🔴 Critical' if x >= 50 else '🟠 High' if x >= 30 else '🟡 Medium' if x >= 15 else '🟢 Low'
+        )
+        
+        return problematic.head(10)  # Return top 10 worst
+
     def calculate_diversification_details(self, metrics: Dict) -> Dict:
         """Calculate detailed diversification score breakdown for explanation"""
         sector_allocation = metrics.get('sector_allocation', pd.DataFrame())
@@ -1564,6 +1659,87 @@ def main():
                 st.warning("🟠 **Partially Data-Driven** (1/3 actual)")
             else:
                 st.error("🔴 **Estimate-Based** (0/3 actual)")
+        
+        # 🚨 PORTFOLIO OPTIMIZATION ALERTS
+        st.header("🚨 Portfolio Optimization Alerts")
+        st.info("🔍 **Automated analysis** - stocks that may need attention for portfolio optimization")
+        
+        problematic_stocks = analyzer.identify_problematic_stocks(portfolio_df, metrics, historical_performance)
+        
+        if not problematic_stocks.empty:
+            st.subheader("⚠️ Top 5 Stocks to Review")
+            
+            # Create the problematic stocks table
+            display_problematic = problematic_stocks.head(5).copy()
+            display_problematic['Weight %'] = (display_problematic['weight'] * 100).round(1)
+            display_problematic['Value'] = (display_problematic['shares'] * display_problematic['current_price']).round(2)
+            
+            # Format for display
+            display_cols = ['symbol', 'severity', 'problem_score', 'Weight %', 'Value', 'issues']
+            final_display = display_problematic[display_cols].copy()
+            final_display.columns = ['Stock', 'Severity', 'Risk Score', 'Weight %', 'Value ($)', 'Issues Identified']
+            
+            st.dataframe(
+                final_display,
+                column_config={
+                    "Stock": st.column_config.TextColumn("Stock", width="small"),
+                    "Severity": st.column_config.TextColumn("Severity", width="small"),
+                    "Risk Score": st.column_config.NumberColumn("Risk Score", format="%.0f", width="small"),
+                    "Weight %": st.column_config.NumberColumn("Weight %", format="%.1f%%", width="small"),
+                    "Value ($)": st.column_config.NumberColumn("Value ($)", format="$%.2f", width="small"),
+                    "Issues Identified": st.column_config.TextColumn("Issues Identified", width="large")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Summary insights
+            critical_count = len(problematic_stocks[problematic_stocks['severity'].str.contains('Critical')])
+            high_count = len(problematic_stocks[problematic_stocks['severity'].str.contains('High')])
+            total_problem_weight = problematic_stocks.head(5)['weight'].sum() * 100
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🔴 Critical Issues", critical_count)
+            with col2:
+                st.metric("🟠 High Risk Stocks", high_count)
+            with col3:
+                st.metric("⚠️ Problem Weight", f"{total_problem_weight:.1f}%")
+            
+            # Action recommendations
+            st.markdown("### 💡 **Optimization Recommendations:**")
+            
+            recommendations = []
+            
+            if critical_count > 0:
+                recommendations.append("🔴 **Immediate Action**: Review critical issues - consider reducing or replacing high-risk positions")
+            
+            if total_problem_weight > 30:
+                recommendations.append("⚖️ **Rebalancing**: Problematic stocks represent significant portfolio weight - consider reallocation")
+            
+            # Check for specific issues
+            overvalued_count = len(problematic_stocks[problematic_stocks['issues'].str.contains('Overvalued|High P/E')])
+            concentration_count = len(problematic_stocks[problematic_stocks['issues'].str.contains('Concentrated|Over-Sized')])
+            high_risk_count = len(problematic_stocks[problematic_stocks['issues'].str.contains('High Risk')])
+            
+            if overvalued_count >= 2:
+                recommendations.append("📈 **Valuation Check**: Multiple overvalued stocks detected - consider value alternatives")
+            
+            if concentration_count >= 2:
+                recommendations.append("🎯 **Diversification**: High concentration detected - spread risk across more positions")
+            
+            if high_risk_count >= 2:
+                recommendations.append("⚡ **Risk Management**: Multiple high-beta stocks - consider lower-risk alternatives")
+            
+            if not recommendations:
+                recommendations.append("✅ **Good Portfolio Health**: Minor issues detected - consider fine-tuning based on specific concerns")
+            
+            for rec in recommendations:
+                st.write(rec)
+                
+        else:
+            st.success("✅ **Excellent Portfolio Health!** No significant issues detected in your current holdings.")
+            st.info("💡 Your portfolio appears well-balanced across valuation, risk, diversification, and position sizing metrics.")
         
         # Final optimization insights
         insights = []
