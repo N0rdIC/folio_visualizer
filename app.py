@@ -147,18 +147,51 @@ class PortfolioAnalyzer:
             price_only_return_total = historical_performance['Price_Only_Return'].iloc[-1] if 'Price_Only_Return' in historical_performance.columns else 0
             actual_price_growth = ((1 + price_only_return_total/100) ** (1/years) - 1)
             estimated_growth = actual_price_growth
-            data_source = "actual_historical"
+            return_data_source = "actual_historical"
         else:
             # Fall back to market estimate
             estimated_growth = 0.08  # 8% estimated capital appreciation
-            data_source = "market_estimate"
+            return_data_source = "market_estimate"
         
         expected_return = dividend_yield + estimated_growth
         
-        # Portfolio risk (volatility) estimation
+        # Portfolio risk (volatility) calculation - use actual if available
         portfolio_beta = metrics.get('portfolio_beta', 1.0)
         market_volatility = 0.16  # 16% historical S&P 500 volatility
-        portfolio_volatility = portfolio_beta * market_volatility
+        
+        if historical_performance is not None and not historical_performance.empty and len(historical_performance) > 30:
+            # Calculate actual portfolio volatility from historical portfolio values
+            # Use Total_Value column which contains actual portfolio value over time
+            if 'Total_Value' in historical_performance.columns:
+                portfolio_values = historical_performance['Total_Value'].dropna()
+                
+                if len(portfolio_values) > 10:  # Need sufficient data points
+                    # Calculate periodic returns (percentage change between periods)
+                    periodic_returns = portfolio_values.pct_change().dropna()
+                    
+                    if len(periodic_returns) > 5:
+                        # Calculate volatility as standard deviation of periodic returns
+                        periodic_volatility = periodic_returns.std()
+                        # Annualize the volatility (assuming roughly daily data)
+                        annual_volatility = periodic_volatility * np.sqrt(252)  # 252 trading days per year
+                        portfolio_volatility = annual_volatility
+                        volatility_data_source = "actual_historical"
+                    else:
+                        # Fall back to beta-adjusted market volatility
+                        portfolio_volatility = portfolio_beta * market_volatility
+                        volatility_data_source = "beta_adjusted"
+                else:
+                    # Fall back to beta-adjusted market volatility
+                    portfolio_volatility = portfolio_beta * market_volatility
+                    volatility_data_source = "beta_adjusted"
+            else:
+                # Fall back to beta-adjusted market volatility
+                portfolio_volatility = portfolio_beta * market_volatility
+                volatility_data_source = "beta_adjusted"
+        else:
+            # Fall back to beta-adjusted market volatility
+            portfolio_volatility = portfolio_beta * market_volatility
+            volatility_data_source = "beta_adjusted"
         
         # Sharpe ratio calculation
         excess_return = expected_return - risk_free_rate
@@ -174,8 +207,10 @@ class PortfolioAnalyzer:
             'market_volatility': market_volatility,
             'portfolio_volatility': portfolio_volatility,
             'excess_return': excess_return,
-            'data_source': data_source,
-            'price_growth_annualized_pct': estimated_growth * 100
+            'return_data_source': return_data_source,
+            'volatility_data_source': volatility_data_source,
+            'price_growth_annualized_pct': estimated_growth * 100,
+            'volatility_annualized_pct': portfolio_volatility * 100
         }
 
     def calculate_diversification_details(self, metrics: Dict) -> Dict:
@@ -247,7 +282,7 @@ class PortfolioAnalyzer:
         )
         
         # Expected Return breakdown
-        growth_label = f"Price Growth ({sharpe_details['data_source'].replace('_', ' ').title()})"
+        growth_label = f"Price Growth ({sharpe_details['return_data_source'].replace('_', ' ').title()})"
         return_components = ['Dividend Yield', growth_label, 'Total Expected']
         return_values = [
             sharpe_details['dividend_yield'] * 100,
@@ -255,7 +290,7 @@ class PortfolioAnalyzer:
             sharpe_details['expected_return'] * 100
         ]
         # Use different colors for actual vs estimated data
-        colors_return = ['#2E8B57', '#4682B4' if sharpe_details['data_source'] == "actual_historical" else '#FFA500', '#228B22']
+        colors_return = ['#2E8B57', '#4682B4' if sharpe_details['return_data_source'] == "actual_historical" else '#FFA500', '#228B22']
         
         fig.add_trace(go.Bar(
             x=return_components,
@@ -267,13 +302,15 @@ class PortfolioAnalyzer:
         ), row=1, col=1)
         
         # Risk breakdown
-        risk_components = ['Market Vol', 'Portfolio Beta', 'Portfolio Vol']
+        volatility_label = f"Portfolio Vol ({sharpe_details['volatility_data_source'].replace('_', ' ').title()})"
+        risk_components = ['Market Vol', 'Portfolio Beta', volatility_label]
         risk_values = [
             sharpe_details['market_volatility'] * 100,
             sharpe_details['portfolio_beta'],
             sharpe_details['portfolio_volatility'] * 100
         ]
-        colors_risk = ['#DC143C', '#FF6347', '#B22222']
+        # Use different colors for actual vs estimated volatility
+        colors_risk = ['#DC143C', '#FF6347', '#4682B4' if sharpe_details['volatility_data_source'] == "actual_historical" else '#B22222']
         
         fig.add_trace(go.Bar(
             x=risk_components,
@@ -1256,11 +1293,13 @@ def main():
         with col1:
             sharpe_ratio = sharpe_details['sharpe_ratio']
             sharpe_color = "🟢" if sharpe_ratio > 1.0 else "🟡" if sharpe_ratio > 0.5 else "🔴"
-            data_icon = "📊" if sharpe_details['data_source'] == "actual_historical" else "📈"
+            return_icon = "📊" if sharpe_details['return_data_source'] == "actual_historical" else "📈"
+            volatility_icon = "📊" if sharpe_details['volatility_data_source'] == "actual_historical" else "⚖️"
+            combined_icon = f"{return_icon}{volatility_icon}"
             st.metric(
                 "Sharpe Coefficient", 
-                f"{sharpe_color} {sharpe_ratio:.2f} {data_icon}",
-                help=f"Risk-adjusted return (>1.0 = good, >2.0 = excellent). {data_icon} = {'Actual historical data' if sharpe_details['data_source'] == 'actual_historical' else 'Market estimate'}"
+                f"{sharpe_color} {sharpe_ratio:.2f} {combined_icon}",
+                help=f"Risk-adjusted return (>1.0 = good, >2.0 = excellent). Icons: {return_icon}=return data, {volatility_icon}=volatility data"
             )
         
         with col2:
@@ -1337,27 +1376,33 @@ def main():
             
             with col1:
                 st.markdown("### 📈 **Return Components**")
-                growth_source = "📊 Actual Historical" if sharpe_details['data_source'] == "actual_historical" else "📈 Market Estimate"
+                growth_source = "📊 Actual Historical" if sharpe_details['return_data_source'] == "actual_historical" else "📈 Market Estimate"
                 st.write(f"• **Dividend Yield**: {sharpe_details['dividend_yield']*100:.1f}% (actual portfolio yield)")
                 st.write(f"• **Price Growth**: {sharpe_details['estimated_growth']*100:.1f}% ({growth_source})")
                 st.write(f"• **Total Expected Return**: {sharpe_details['expected_return']*100:.1f}%")
                 st.write(f"• **Risk-Free Rate**: {sharpe_details['risk_free_rate']*100:.1f}% (10-year Treasury)")
                 st.write(f"• **Excess Return**: {sharpe_details['excess_return']*100:.1f}% (premium over risk-free)")
                 
-                if sharpe_details['data_source'] == "actual_historical":
+                if sharpe_details['return_data_source'] == "actual_historical":
                     st.success(f"✅ **Using actual {years}-year price appreciation from your portfolio!**")
                 else:
                     st.info("ℹ️ **Using market estimate** - no historical data available")
             
             with col2:
                 st.markdown("### ⚡ **Risk Components**")
+                volatility_source = "📊 Actual Portfolio" if sharpe_details['volatility_data_source'] == "actual_historical" else "📈 Beta-Adjusted"
                 st.write(f"• **Portfolio Beta**: {sharpe_details['portfolio_beta']:.2f} (vs S&P 500)")
                 st.write(f"• **Market Volatility**: {sharpe_details['market_volatility']*100:.0f}% (historical S&P 500)")
-                st.write(f"• **Portfolio Volatility**: {sharpe_details['portfolio_volatility']*100:.1f}% (beta-adjusted)")
+                st.write(f"• **Portfolio Volatility**: {sharpe_details['portfolio_volatility']*100:.1f}% ({volatility_source})")
                 
                 st.markdown("### 🎯 **Final Calculation**")
                 st.write(f"**Sharpe = ({sharpe_details['expected_return']*100:.1f}% - {sharpe_details['risk_free_rate']*100:.1f}%) ÷ {sharpe_details['portfolio_volatility']*100:.1f}%**")
                 st.write(f"**= {sharpe_details['sharpe_ratio']:.2f}**")
+                
+                if sharpe_details['volatility_data_source'] == "actual_historical":
+                    st.success(f"✅ **Using actual portfolio volatility from {years}-year history!**")
+                else:
+                    st.info("ℹ️ **Using beta-adjusted volatility** - insufficient historical data")
             
             # Interpretation guide
             st.markdown("---")
@@ -1456,18 +1501,44 @@ def main():
                 st.success("✅ **Excellent diversification!** Your portfolio shows strong sector balance.")
         
         # Show confirmation of data sources used
-        col1, col2 = st.columns(2)
+        st.subheader("📊 Data Sources Used")
+        col1, col2, col3 = st.columns(3)
+        
         with col1:
-            if sharpe_details['data_source'] == "actual_historical":
-                st.success(f"📊 **Sharpe ratio uses actual portfolio data**: {sharpe_details['estimated_growth']*100:.1f}% annualized price growth from {years}-year history")
+            st.markdown("**🎯 Sharpe Ratio Components:**")
+            if sharpe_details['return_data_source'] == "actual_historical":
+                st.success(f"📊 **Return**: {sharpe_details['estimated_growth']*100:.1f}% actual price growth ({years}y)")
             else:
-                st.warning("📈 **Sharpe ratio uses market estimate**: 8.0% growth assumption (no historical data available)")
+                st.warning("📈 **Return**: 8.0% market estimate")
+                
+            if sharpe_details['volatility_data_source'] == "actual_historical":
+                st.success(f"📊 **Volatility**: {sharpe_details['portfolio_volatility']*100:.1f}% actual portfolio risk")
+            else:
+                st.warning(f"⚖️ **Volatility**: {sharpe_details['portfolio_volatility']*100:.1f}% beta-adjusted estimate")
         
         with col2:
+            st.markdown("**📈 Total Return:**")
             if actual_annual_return_for_synthesis is not None:
-                st.success(f"📊 **Total return uses actual data**: {actual_annual_return_for_synthesis:.1f}% (matches performance curves above)")
+                st.success(f"📊 **Actual**: {actual_annual_return_for_synthesis:.1f}% from historical curves")
             else:
-                st.warning("📈 **Total return estimated** - no historical performance data available")
+                st.warning("📈 **Estimated**: No historical data available")
+        
+        with col3:
+            st.markdown("**🎯 Accuracy Level:**")
+            actual_data_count = sum([
+                sharpe_details['return_data_source'] == "actual_historical",
+                sharpe_details['volatility_data_source'] == "actual_historical", 
+                actual_annual_return_for_synthesis is not None
+            ])
+            
+            if actual_data_count == 3:
+                st.success("🟢 **Fully Data-Driven** (3/3 actual)")
+            elif actual_data_count == 2:
+                st.info("🟡 **Mostly Data-Driven** (2/3 actual)")
+            elif actual_data_count == 1:
+                st.warning("🟠 **Partially Data-Driven** (1/3 actual)")
+            else:
+                st.error("🔴 **Estimate-Based** (0/3 actual)")
         
         # Final optimization insights
         insights = []
