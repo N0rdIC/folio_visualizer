@@ -745,13 +745,34 @@ def main():
         # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
-        # Calculate initial synthesis metrics (with estimates)
-        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
+        # Calculate historical performance FIRST to get actual annualized return
+        st.info("📊 Calculating historical performance for accurate synthesis metrics...")
+        years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
         
-        # 🎯 SYNTHESIS TABLE (PROMINENT AT TOP)
+        with st.spinner("Calculating historical performance..."):
+            historical_performance = analyzer.simulate_historical_performance(
+                portfolio_holdings, 
+                years=years,
+                show_dividend_details=show_dividend_details
+            )
+        
+        # Extract actual annualized return from historical performance
+        actual_annual_return = None
+        if not historical_performance.empty and len(historical_performance) > 1:
+            total_return = historical_performance['Total_Return'].iloc[-1]
+            actual_annual_return = ((1 + total_return/100) ** (1/years) - 1) * 100
+        
+        # Now calculate synthesis metrics with actual data
+        synthesis_metrics = analyzer.calculate_synthesis_metrics(
+            portfolio_df, 
+            metrics, 
+            actual_annual_return=actual_annual_return
+        )
+        
+        # 🎯 SYNTHESIS TABLE (NOW WITH ACTUAL DATA)
         st.header("🎯 Portfolio Synthesis Metrics")
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             sharpe_color = "🟢" if synthesis_metrics['sharpe_ratio'] > 1.0 else "🟡" if synthesis_metrics['sharpe_ratio'] > 0.5 else "🔴"
@@ -775,10 +796,20 @@ def main():
             st.metric(
                 "Ann. Total Return (Div)", 
                 f"{return_color} {synthesis_metrics['annualized_total_return']:.1f}%",
-                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated (will update after historical analysis)'}"
+                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated'}"
             )
         
         with col4:
+            # NEW: Dividend Yield
+            div_yield = metrics['portfolio_dividend_yield']
+            yield_color = "🟢" if div_yield > 4 else "🟡" if div_yield > 2 else "🔴"
+            st.metric(
+                "Dividend Yield", 
+                f"{yield_color} {div_yield:.1f}%",
+                help="Current annual dividend yield"
+            )
+        
+        with col5:
             div_color = "🟢" if synthesis_metrics['sector_diversification_score'] > 70 else "🟡" if synthesis_metrics['sector_diversification_score'] > 40 else "🔴"
             st.metric(
                 "Sector Diversification", 
@@ -786,9 +817,11 @@ def main():
                 help="Sector balance: More sectors + balanced allocation + no concentration >25%"
             )
         
-        # Show initial data source
-        if synthesis_metrics.get('data_source') == 'estimated':
-            st.info("📈 **Annualized return currently estimated** - will update with actual data after historical analysis below")
+        # Show data source confirmation
+        if synthesis_metrics.get('data_source') == 'actual_data':
+            st.success("📊 **Synthesis metrics calculated using actual historical performance data**")
+        else:
+            st.warning("📈 **Synthesis metrics estimated** (historical data unavailable)")
         
         # Sector diversification detailed breakdown
         if 'diversification_breakdown' in synthesis_metrics:
@@ -816,6 +849,8 @@ def main():
             insights.append("📈 Portfolio may be overvalued vs market")
         if synthesis_metrics['annualized_total_return'] < 8:
             insights.append("📊 Below-market returns - consider growth opportunities")
+        if div_yield < 2:
+            insights.append("💰 Low dividend yield - consider income-generating stocks")
         if synthesis_metrics['sector_diversification_score'] < 50:
             insights.append("🎯 Poor diversification - add more sectors")
         
@@ -1205,7 +1240,8 @@ def main():
         **Synthesis Metrics:**
         - **Sharpe Coefficient**: Risk-adjusted return measure (higher = better risk/return)
         - **Mean Opportunity Margin**: Valuation vs market average (+% = undervalued, good!)
-        - **Annualized Total Return**: Expected return with dividends reinvested
+        - **Annualized Total Return**: Expected return with dividends reinvested (from actual curves when available)
+        - **Dividend Yield**: Current annual dividend income as % of portfolio value
         - **Sector Diversification**: Portfolio balance score (0-100)
         
         **Sector Diversification Explained:**
