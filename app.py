@@ -763,11 +763,16 @@ def main():
             actual_annual_return = ((1 + total_return/100) ** (1/years) - 1) * 100
         
         # Now calculate synthesis metrics with actual data
-        synthesis_metrics = analyzer.calculate_synthesis_metrics(
-            portfolio_df, 
-            metrics, 
-            actual_annual_return=actual_annual_return
-        )
+        try:
+            synthesis_metrics = analyzer.calculate_synthesis_metrics(
+                portfolio_df, 
+                metrics, 
+                actual_annual_return
+            )
+        except Exception as e:
+            st.warning(f"Error with synthesis calculation: {str(e)}")
+            # Fallback to basic calculation
+            synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
         
         # 🎯 SYNTHESIS TABLE (NOW WITH ACTUAL DATA)
         st.header("🎯 Portfolio Synthesis Metrics")
