@@ -745,8 +745,8 @@ def main():
         # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
         
-        # Calculate historical performance FIRST to get actual annualized return
-        st.info("📊 Calculating historical performance for accurate synthesis metrics...")
+        # Calculate historical performance FIRST
+        st.info("📊 Calculating historical performance...")
         years = int(analysis_period[0]) if analysis_period[0].isdigit() else 3
         
         with st.spinner("Calculating historical performance..."):
@@ -755,109 +755,6 @@ def main():
                 years=years,
                 show_dividend_details=show_dividend_details
             )
-        
-        # Extract actual annualized return from historical performance
-        actual_annual_return = None
-        if not historical_performance.empty and len(historical_performance) > 1:
-            total_return = historical_performance['Total_Return'].iloc[-1]
-            actual_annual_return = ((1 + total_return/100) ** (1/years) - 1) * 100
-            # Add it to metrics for synthesis calculation
-            metrics['actual_annual_return'] = actual_annual_return
-        
-        # Now calculate synthesis metrics with actual data
-        synthesis_metrics = analyzer.calculate_synthesis_metrics(portfolio_df, metrics)
-        
-        # 🎯 SYNTHESIS TABLE (NOW WITH ACTUAL DATA)
-        st.header("🎯 Portfolio Synthesis Metrics")
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        with col1:
-            sharpe_color = "🟢" if synthesis_metrics['sharpe_ratio'] > 1.0 else "🟡" if synthesis_metrics['sharpe_ratio'] > 0.5 else "🔴"
-            st.metric(
-                "Sharpe Coefficient", 
-                f"{sharpe_color} {synthesis_metrics['sharpe_ratio']:.2f}",
-                help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)"
-            )
-        
-        with col2:
-            margin_color = "🟢" if synthesis_metrics['mean_opportunity_margin'] > 10 else "🟡" if synthesis_metrics['mean_opportunity_margin'] > -10 else "🔴"
-            st.metric(
-                "Mean Opp. Margin", 
-                f"{margin_color} {synthesis_metrics['mean_opportunity_margin']:+.1f}%",
-                help="Valuation vs market (+% = undervalued)"
-            )
-        
-        with col3:
-            return_color = "🟢" if synthesis_metrics['annualized_total_return'] > 12 else "🟡" if synthesis_metrics['annualized_total_return'] > 8 else "🔴"
-            data_source_icon = "📊" if synthesis_metrics.get('data_source') == 'actual_data' else "📈"
-            st.metric(
-                "Ann. Total Return (Div)", 
-                f"{return_color} {synthesis_metrics['annualized_total_return']:.1f}%",
-                help=f"Expected annual return with dividends. {data_source_icon} {'Based on actual historical data' if synthesis_metrics.get('data_source') == 'actual_data' else 'Estimated'}"
-            )
-        
-        with col4:
-            # NEW: Dividend Yield
-            div_yield = metrics['portfolio_dividend_yield']
-            yield_color = "🟢" if div_yield > 4 else "🟡" if div_yield > 2 else "🔴"
-            st.metric(
-                "Dividend Yield", 
-                f"{yield_color} {div_yield:.1f}%",
-                help="Current annual dividend yield"
-            )
-        
-        with col5:
-            div_color = "🟢" if synthesis_metrics['sector_diversification_score'] > 70 else "🟡" if synthesis_metrics['sector_diversification_score'] > 40 else "🔴"
-            st.metric(
-                "Sector Diversification", 
-                f"{div_color} {synthesis_metrics['sector_diversification_score']:.0f}/100",
-                help="Sector balance: More sectors + balanced allocation + no concentration >25%"
-            )
-        
-        # Show data source confirmation
-        if synthesis_metrics.get('data_source') == 'actual_data':
-            st.success("📊 **Synthesis metrics calculated using actual historical performance data**")
-        else:
-            st.warning("📈 **Synthesis metrics estimated** (historical data unavailable)")
-        
-        # Sector diversification detailed breakdown
-        if 'diversification_breakdown' in synthesis_metrics:
-            breakdown = synthesis_metrics['diversification_breakdown']
-            st.info(f"""
-            **🎯 Sector Diversification Breakdown:**
-            • **Sectors**: {breakdown['num_sectors']} sectors → {breakdown['sector_points']:.0f}/50 points (8 points per sector, max 50)
-            • **Concentration**: Largest sector {breakdown['max_sector_weight']:.1f}% → -{breakdown['concentration_penalty']:.0f} penalty (penalty if >25%)
-            • **Balance**: Distribution balance → +{breakdown['balance_score']:.0f}/30 points
-            • **Final Score**: {breakdown['sector_points']:.0f} - {breakdown['concentration_penalty']:.0f} + {breakdown['balance_score']:.0f} = {breakdown['final_score']:.0f}/100
-            """)
-        
-        # Show sector allocation details
-        sector_allocation = metrics['sector_allocation']
-        if len(sector_allocation) > 0:
-            max_sector = sector_allocation['weight'].idxmax()
-            max_weight = sector_allocation['weight'].max() * 100
-            st.write(f"**Current Allocation:** {len(sector_allocation)} sectors • Largest: {max_sector} ({max_weight:.1f}%)")
-        
-        # Quick insights
-        insights = []
-        if synthesis_metrics['sharpe_ratio'] < 0.5:
-            insights.append("⚠️ Low Sharpe ratio - consider higher return/lower risk assets")
-        if synthesis_metrics['mean_opportunity_margin'] < -15:
-            insights.append("📈 Portfolio may be overvalued vs market")
-        if synthesis_metrics['annualized_total_return'] < 8:
-            insights.append("📊 Below-market returns - consider growth opportunities")
-        if div_yield < 2:
-            insights.append("💰 Low dividend yield - consider income-generating stocks")
-        if synthesis_metrics['sector_diversification_score'] < 50:
-            insights.append("🎯 Poor diversification - add more sectors")
-        
-        if insights:
-            st.warning("**Optimization Opportunities:** " + " • ".join(insights))
-        else:
-            st.success("✅ **Well-optimized portfolio** - good balance across metrics")
-        
-        st.markdown("---")
         
         # Portfolio Overview
         st.header("📊 Portfolio Overview")
@@ -1188,6 +1085,145 @@ def main():
             st.write("• Dividend payments are outside the 12-month window")
             st.write("• Try including dividend-paying stocks (e.g., KO, JNJ, PG)")
         
+        # 🎯 SYNTHESIS TABLE (AT THE END WITH ACTUAL DATA)
+        st.header("🎯 Portfolio Synthesis Metrics")
+        st.info("📊 **Final synthesis using actual calculated values from analysis above**")
+        
+        # Get actual annualized return from historical performance if available
+        actual_annual_return_for_synthesis = None
+        if not historical_performance.empty and len(historical_performance) > 1:
+            total_return_for_synthesis = historical_performance['Total_Return'].iloc[-1]
+            actual_annual_return_for_synthesis = ((1 + total_return_for_synthesis/100) ** (1/years) - 1) * 100
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            # Calculate Sharpe ratio
+            risk_free_rate = 0.04
+            estimated_return = metrics['portfolio_dividend_yield'] / 100 + 0.08
+            estimated_volatility = metrics['portfolio_beta'] * 0.16
+            sharpe_ratio = (estimated_return - risk_free_rate) / estimated_volatility if estimated_volatility > 0 else 0
+            
+            sharpe_color = "🟢" if sharpe_ratio > 1.0 else "🟡" if sharpe_ratio > 0.5 else "🔴"
+            st.metric(
+                "Sharpe Coefficient", 
+                f"{sharpe_color} {sharpe_ratio:.2f}",
+                help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)"
+            )
+        
+        with col2:
+            # Calculate opportunity margin
+            valid_pe_data = portfolio_df[portfolio_df['pe_ratio'] > 0]
+            if len(valid_pe_data) > 0:
+                portfolio_weights = valid_pe_data['shares'] * valid_pe_data['current_price']
+                portfolio_weights = portfolio_weights / portfolio_weights.sum()
+                weighted_pe = (valid_pe_data['pe_ratio'] * portfolio_weights).sum()
+                market_pe = 20
+                opportunity_margin = ((market_pe - weighted_pe) / market_pe) * 100
+            else:
+                opportunity_margin = 0
+            
+            margin_color = "🟢" if opportunity_margin > 10 else "🟡" if opportunity_margin > -10 else "🔴"
+            st.metric(
+                "Mean Opp. Margin", 
+                f"{margin_color} {opportunity_margin:+.1f}%",
+                help="Valuation vs market (+% = undervalued)"
+            )
+        
+        with col3:
+            # Use ACTUAL annualized return from curves or estimate
+            if actual_annual_return_for_synthesis is not None:
+                annual_return_display = actual_annual_return_for_synthesis
+                data_source_icon = "📊"
+                help_text = "Actual annual return from historical performance curves above"
+            else:
+                annual_return_display = metrics['portfolio_dividend_yield'] + 8  # Estimate
+                data_source_icon = "📈"
+                help_text = "Estimated (no historical data available)"
+            
+            return_color = "🟢" if annual_return_display > 12 else "🟡" if annual_return_display > 8 else "🔴"
+            st.metric(
+                "Ann. Total Return (Div)", 
+                f"{return_color} {annual_return_display:.1f}%",
+                help=f"{data_source_icon} {help_text}"
+            )
+        
+        with col4:
+            # Dividend Yield
+            div_yield = metrics['portfolio_dividend_yield']
+            yield_color = "🟢" if div_yield > 4 else "🟡" if div_yield > 2 else "🔴"
+            st.metric(
+                "Dividend Yield", 
+                f"{yield_color} {div_yield:.1f}%",
+                help="Current annual dividend yield"
+            )
+        
+        with col5:
+            # Calculate sector diversification score
+            sector_allocation = metrics['sector_allocation']
+            num_sectors = len(sector_allocation)
+            sector_points = min(50, num_sectors * 8)
+            
+            if len(sector_allocation) > 0:
+                max_sector_weight = sector_allocation['weight'].max()
+                concentration_penalty = max(0, (max_sector_weight - 0.25) * 100)
+            else:
+                max_sector_weight = 0
+                concentration_penalty = 0
+            
+            if num_sectors > 0:
+                ideal_weight = 1.0 / num_sectors
+                deviations = abs(sector_allocation['weight'] - ideal_weight)
+                balance_score = max(0, 30 - deviations.sum() * 100)
+            else:
+                balance_score = 0
+            
+            diversification_score = max(0, min(100, sector_points - concentration_penalty + balance_score))
+            
+            div_color = "🟢" if diversification_score > 70 else "🟡" if diversification_score > 40 else "🔴"
+            st.metric(
+                "Sector Diversification", 
+                f"{div_color} {diversification_score:.0f}/100",
+                help="Sector balance: More sectors + balanced allocation + no concentration >25%"
+            )
+        
+        # Show confirmation of data source
+        if actual_annual_return_for_synthesis is not None:
+            st.success(f"📊 **Annualized return uses actual data from curves**: {actual_annual_return_for_synthesis:.1f}% (matches performance summary above)")
+        else:
+            st.warning("📈 **Annualized return estimated** - no historical performance data available")
+        
+        # Sector breakdown
+        if len(sector_allocation) > 0:
+            max_sector = sector_allocation['weight'].idxmax()
+            max_weight = sector_allocation['weight'].max() * 100
+            
+            st.info(f"""
+            **🎯 Sector Diversification Breakdown:**
+            • **Sectors**: {num_sectors} sectors → {sector_points:.0f}/50 points (8 points per sector, max 50)
+            • **Concentration**: Largest sector {max_sector} ({max_weight:.1f}%) → -{concentration_penalty:.0f} penalty (penalty if >25%)
+            • **Balance**: Distribution balance → +{balance_score:.0f}/30 points
+            • **Final Score**: {sector_points:.0f} - {concentration_penalty:.0f} + {balance_score:.0f} = {diversification_score:.0f}/100
+            """)
+        
+        # Final optimization insights
+        insights = []
+        if sharpe_ratio < 0.5:
+            insights.append("⚠️ Low Sharpe ratio - consider higher return/lower risk assets")
+        if opportunity_margin < -15:
+            insights.append("📈 Portfolio may be overvalued vs market")
+        if annual_return_display < 8:
+            insights.append("📊 Below-market returns - consider growth opportunities")
+        if div_yield < 2:
+            insights.append("💰 Low dividend yield - consider income-generating stocks")
+        if diversification_score < 50:
+            insights.append("🎯 Poor diversification - add more sectors")
+        
+        if insights:
+            st.warning("**Final Optimization Opportunities:** " + " • ".join(insights))
+        else:
+            st.success("✅ **Well-optimized portfolio** - excellent balance across all metrics")
+        
         # Export
         st.subheader("📥 Export")
         
@@ -1235,10 +1271,10 @@ def main():
         st.markdown("---")
         st.subheader("📊 About Portfolio Optimizer")
         st.markdown("""
-        **Synthesis Metrics:**
+        **Synthesis Metrics (5 Total):**
         - **Sharpe Coefficient**: Risk-adjusted return measure (higher = better risk/return)
         - **Mean Opportunity Margin**: Valuation vs market average (+% = undervalued, good!)
-        - **Annualized Total Return**: Expected return with dividends reinvested (from actual curves when available)
+        - **Annualized Total Return**: Actual return from historical curves (with dividends reinvested)
         - **Dividend Yield**: Current annual dividend income as % of portfolio value
         - **Sector Diversification**: Portfolio balance score (0-100)
         
