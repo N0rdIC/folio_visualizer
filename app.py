@@ -934,13 +934,21 @@ def main():
     
     # CSV Upload handling
     if uploaded_file:
-        try:
-            csv_content = uploaded_file.read().decode('utf-8')
-            imported_holdings = analyzer.import_portfolio_from_csv(csv_content)
-            st.session_state.holdings = imported_holdings.copy()
-            st.sidebar.success(f"✅ Loaded {len(imported_holdings)} holdings")
-        except Exception as e:
-            st.sidebar.error(f"❌ Error: {str(e)}")
+        # Check if this is a new file upload by comparing file hash
+        uploaded_file_content = uploaded_file.read()
+        uploaded_file_hash = hash(uploaded_file_content)
+        
+        # Only process if this is a new file (different hash) or first time
+        if 'last_uploaded_file_hash' not in st.session_state or st.session_state.last_uploaded_file_hash != uploaded_file_hash:
+            try:
+                csv_content = uploaded_file_content.decode('utf-8')
+                imported_holdings = analyzer.import_portfolio_from_csv(csv_content)
+                st.session_state.holdings = imported_holdings.copy()
+                st.session_state.last_uploaded_file_hash = uploaded_file_hash
+                st.sidebar.success(f"✅ Loaded {len(imported_holdings)} holdings")
+            except Exception as e:
+                st.sidebar.error(f"❌ Error: {str(e)}")
+        # If it's the same file, don't reload and overwrite manual additions
     
     # Add stocks section (always available)
     st.sidebar.subheader("➕ Add/Modify Stocks")
@@ -963,9 +971,6 @@ def main():
         
         if st.form_submit_button("Add/Update Stock"):
             if new_symbol:
-                # Debug: show current holdings before modification
-                st.sidebar.write(f"Debug: Current holdings before: {len(st.session_state.holdings)}")
-                
                 # Remove if exists
                 st.session_state.holdings = [h for h in st.session_state.holdings if h['symbol'] != new_symbol]
                 
@@ -1005,10 +1010,6 @@ def main():
                     else:
                         st.session_state.holdings.append({'symbol': new_symbol, 'shares': 100})
                         st.sidebar.success(f"Added {new_symbol}: 100 shares (first stock)")
-                
-                # Debug: show holdings after modification
-                st.sidebar.write(f"Debug: Holdings after: {len(st.session_state.holdings)}")
-                st.sidebar.write(f"Debug: Holdings list: {[h['symbol'] for h in st.session_state.holdings]}")
     
     # Remove stocks section
     if st.session_state.holdings:
