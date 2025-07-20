@@ -1088,30 +1088,6 @@ def main():
         with col4:
             st.metric("Portfolio Beta", f"{metrics['portfolio_beta']:.2f}")
         
-        # Holdings table (optional - in expander)
-        with st.expander("📋 View Detailed Holdings", expanded=False):
-            display_df = portfolio_df.copy()
-            display_df['Value'] = display_df['shares'] * display_df['current_price']
-            display_df['Weight %'] = (display_df['Value'] / metrics['total_value']) * 100
-            display_df['Annual Div'] = display_df['shares'] * display_df['dividend_rate']
-            
-            st.dataframe(
-                display_df[['symbol', 'name', 'sector', 'shares', 'current_price', 'Value', 'Weight %', 'dividend_yield', 'Annual Div']],
-                column_config={
-                    "symbol": "Symbol",
-                    "name": "Company",
-                    "sector": "Sector", 
-                    "shares": "Shares",
-                    "current_price": st.column_config.NumberColumn("Price", format="$%.2f"),
-                    "Value": st.column_config.NumberColumn("Value", format="$%.2f"),
-                    "Weight %": st.column_config.NumberColumn("Weight %", format="%.1f%%"),
-                    "dividend_yield": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
-                    "Annual Div": st.column_config.NumberColumn("Annual Div", format="$%.2f")
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-        
         # Visualizations
         st.subheader("📈 Analysis")
         
@@ -1741,6 +1717,151 @@ def main():
         else:
             st.success("✅ **Excellent Portfolio Health!** No significant issues detected in your current holdings.")
             st.info("💡 Your portfolio appears well-balanced across valuation, risk, diversification, and position sizing metrics.")
+        
+        # 📋 COMPREHENSIVE HOLDINGS ANALYSIS
+        st.header("📋 Comprehensive Holdings Analysis")
+        st.info("🎯 **Individual stock synthesis metrics** - same criteria as Portfolio Synthesis applied to each stock")
+        
+        # Create comprehensive holdings dataframe with synthesis metrics
+        comprehensive_df = portfolio_df.copy()
+        
+        # Basic portfolio metrics
+        comprehensive_df['Value'] = comprehensive_df['shares'] * comprehensive_df['current_price']
+        comprehensive_df['Weight %'] = (comprehensive_df['Value'] / metrics['total_value']) * 100
+        
+        # 1. SHARPE COEFFICIENT per stock
+        risk_free_rate = 0.04
+        market_volatility = 0.16
+        
+        comprehensive_df['Stock_Expected_Return'] = comprehensive_df.apply(
+            lambda row: (row['dividend_yield']/100) + (sharpe_details['estimated_growth'] if sharpe_details['return_data_source'] == "actual_historical" else 0.08),
+            axis=1
+        )
+        comprehensive_df['Stock_Volatility'] = comprehensive_df['beta'] * market_volatility
+        comprehensive_df['Stock_Sharpe'] = comprehensive_df.apply(
+            lambda row: (row['Stock_Expected_Return'] - risk_free_rate) / row['Stock_Volatility'] if row['Stock_Volatility'] > 0 else 0,
+            axis=1
+        )
+        
+        # 2. MEAN OPPORTUNITY MARGIN per stock
+        market_pe = 20
+        comprehensive_df['Opp_Margin'] = comprehensive_df.apply(
+            lambda row: ((market_pe - row['pe_ratio']) / market_pe) * 100 if row['pe_ratio'] > 0 else 0,
+            axis=1
+        )
+        
+        # 3. ANNUALIZED TOTAL RETURN per stock (estimated)
+        comprehensive_df['Ann_Total_Return'] = comprehensive_df.apply(
+            lambda row: row['dividend_yield'] + (sharpe_details['estimated_growth']*100 if sharpe_details['return_data_source'] == "actual_historical" else 8.0),
+            axis=1
+        )
+        
+        # 4. DIVIDEND YIELD per stock (already available)
+        # Just use existing dividend_yield
+        
+        # Add color coding/icons for quick assessment
+        comprehensive_df['Sharpe_Rating'] = comprehensive_df['Stock_Sharpe'].apply(
+            lambda x: "🟢" if x > 1.0 else "🟡" if x > 0.5 else "🔴"
+        )
+        comprehensive_df['Margin_Rating'] = comprehensive_df['Opp_Margin'].apply(
+            lambda x: "🟢" if x > 10 else "🟡" if x > -10 else "🔴"
+        )
+        comprehensive_df['Return_Rating'] = comprehensive_df['Ann_Total_Return'].apply(
+            lambda x: "🟢" if x > 12 else "🟡" if x > 8 else "🔴"
+        )
+        comprehensive_df['Dividend_Rating'] = comprehensive_df['dividend_yield'].apply(
+            lambda x: "🟢" if x > 4 else "🟡" if x > 2 else "🔴"
+        )
+        
+        # Format for display
+        display_comprehensive = comprehensive_df.copy()
+        display_comprehensive['Sharpe Coef'] = display_comprehensive.apply(
+            lambda row: f"{row['Sharpe_Rating']} {row['Stock_Sharpe']:.2f}", axis=1
+        )
+        display_comprehensive['Opp Margin'] = display_comprehensive.apply(
+            lambda row: f"{row['Margin_Rating']} {row['Opp_Margin']:+.1f}%", axis=1
+        )
+        display_comprehensive['Ann Total Return'] = display_comprehensive.apply(
+            lambda row: f"{row['Return_Rating']} {row['Ann_Total_Return']:.1f}%", axis=1
+        )
+        display_comprehensive['Dividend Yield'] = display_comprehensive.apply(
+            lambda row: f"{row['Dividend_Rating']} {row['dividend_yield']:.1f}%", axis=1
+        )
+        
+        # Display the synthesis metrics table
+        synthesis_display = display_comprehensive[[
+            'symbol', 'name', 'Weight %', 'Value',
+            'Sharpe Coef', 'Opp Margin', 'Ann Total Return', 'Dividend Yield'
+        ]].copy()
+        
+        st.dataframe(
+            synthesis_display,
+            column_config={
+                "symbol": st.column_config.TextColumn("Stock", width="small"),
+                "name": st.column_config.TextColumn("Company", width="medium"),
+                "Weight %": st.column_config.NumberColumn("Weight %", format="%.1f%%", width="small"),
+                "Value": st.column_config.NumberColumn("Value", format="$%.0f", width="small"),
+                "Sharpe Coef": st.column_config.TextColumn("Sharpe Coefficient", width="small"),
+                "Opp Margin": st.column_config.TextColumn("Opportunity Margin", width="small"), 
+                "Ann Total Return": st.column_config.TextColumn("Ann. Total Return", width="small"),
+                "Dividend Yield": st.column_config.TextColumn("Dividend Yield", width="small")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Synthesis Metrics Legend
+        with st.expander("📖 Synthesis Metrics Explained", expanded=False):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                **🎯 Sharpe Coefficient (Individual Stock):**
+                - Formula: (Expected Return - Risk-Free Rate) ÷ Stock Volatility
+                - Expected Return = Dividend Yield + Price Growth
+                - Stock Volatility = Stock Beta × Market Volatility
+                - 🟢 >1.0 = Excellent, 🟡 0.5-1.0 = Good, 🔴 <0.5 = Poor
+                
+                **📈 Opportunity Margin (Individual Stock):**
+                - Formula: (Market P/E - Stock P/E) ÷ Market P/E × 100%
+                - Positive = Undervalued vs market, Negative = Overvalued
+                - 🟢 >+10% = Undervalued, 🟡 ±10% = Fair, 🔴 <-10% = Overvalued
+                """)
+            
+            with col2:
+                st.markdown("""
+                **📊 Annualized Total Return (Individual Stock):**
+                - Formula: Dividend Yield + Capital Appreciation
+                - Uses actual growth data when available, otherwise 8% estimate
+                - Includes dividend reinvestment effect
+                - 🟢 >12% = Excellent, 🟡 8-12% = Good, 🔴 <8% = Below Market
+                
+                **💰 Dividend Yield (Individual Stock):**
+                - Current annual dividend as % of stock price
+                - 🟢 >4% = High Income, 🟡 2-4% = Moderate, 🔴 <2% = Low Income
+                """)
+            
+            # Data source indicator
+            if sharpe_details['return_data_source'] == "actual_historical":
+                st.success(f"📊 **Using actual {years}-year portfolio growth data for individual stock calculations**")
+            else:
+                st.info("📈 **Using 8% market estimate for individual stock growth calculations**")
+        
+        # Summary of individual stock synthesis
+        excellent_sharpe = len(comprehensive_df[comprehensive_df['Stock_Sharpe'] > 1.0])
+        undervalued_stocks = len(comprehensive_df[comprehensive_df['Opp_Margin'] > 10])
+        high_return_stocks = len(comprehensive_df[comprehensive_df['Ann_Total_Return'] > 12])
+        high_dividend_stocks = len(comprehensive_df[comprehensive_df['dividend_yield'] > 4])
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🎯 Excellent Sharpe (>1.0)", excellent_sharpe)
+        with col2:
+            st.metric("📈 Undervalued Stocks", undervalued_stocks)
+        with col3:
+            st.metric("📊 High Return Stocks (>12%)", high_return_stocks)
+        with col4:
+            st.metric("💰 High Dividend Stocks (>4%)", high_dividend_stocks)
         
         # Final optimization insights
         insights = []
