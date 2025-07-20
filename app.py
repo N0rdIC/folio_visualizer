@@ -1000,6 +1000,9 @@ def main():
                     else:
                         st.session_state.holdings.append({'symbol': new_symbol, 'shares': 100})
                         st.sidebar.success(f"Added {new_symbol}: 100 shares (first stock)")
+                
+                # Force app refresh so new stock appears immediately in analysis
+                st.rerun()
     
     # Remove stocks section
     if st.session_state.holdings:
