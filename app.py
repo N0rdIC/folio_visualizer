@@ -1888,7 +1888,8 @@ def main():
         
         with col1:
             # Export holdings CSV
-            csv_data = display_df.to_csv(index=False)
+            export_df = comprehensive_df[['symbol', 'name', 'sector', 'shares', 'current_price', 'Value', 'Weight %', 'dividend_yield', 'Stock_Sharpe', 'Opp_Margin', 'Ann_Total_Return']].copy()
+            csv_data = export_df.to_csv(index=False)
             st.download_button(
                 "📋 Download Holdings CSV",
                 data=csv_data,
