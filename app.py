@@ -963,6 +963,9 @@ def main():
         
         if st.form_submit_button("Add/Update Stock"):
             if new_symbol:
+                # Debug: show current holdings before modification
+                st.sidebar.write(f"Debug: Current holdings before: {len(st.session_state.holdings)}")
+                
                 # Remove if exists
                 st.session_state.holdings = [h for h in st.session_state.holdings if h['symbol'] != new_symbol]
                 
@@ -990,19 +993,22 @@ def main():
                         estimated_portfolio_value = 100000
                         estimated_price = 150
                         calculated_shares = (estimated_portfolio_value * target_weight) / estimated_price
+                        shares_to_add = max(1, int(calculated_shares))
+                        
                         st.session_state.holdings.append({
                             'symbol': new_symbol, 
-                            'shares': max(1, int(calculated_shares)),
+                            'shares': shares_to_add,
                             'target_weight': target_weight,
                             'allocation_method': 'equal'
                         })
-                        st.sidebar.success(f"Added {new_symbol}: Equal weight ({target_weight*100:.1f}%)")
+                        st.sidebar.success(f"Added {new_symbol}: Equal weight ({target_weight*100:.1f}%) - {shares_to_add} shares")
                     else:
                         st.session_state.holdings.append({'symbol': new_symbol, 'shares': 100})
                         st.sidebar.success(f"Added {new_symbol}: 100 shares (first stock)")
                 
-                # Force app refresh so new stock appears immediately in analysis
-                st.rerun()
+                # Debug: show holdings after modification
+                st.sidebar.write(f"Debug: Holdings after: {len(st.session_state.holdings)}")
+                st.sidebar.write(f"Debug: Holdings list: {[h['symbol'] for h in st.session_state.holdings]}")
     
     # Remove stocks section
     if st.session_state.holdings:
