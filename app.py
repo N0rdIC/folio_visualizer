@@ -1816,21 +1816,21 @@ def main():
             
             # 1. ANNUALIZED TOTAL RETURN per stock (actual or estimated)
             if stock_data.get('annualized_total_return') is not None:
-                comprehensive_df.loc[idx, 'Ann_Total_Return'] = stock_data['annualized_total_return']
-                comprehensive_df.loc[idx, 'Return_Data_Source'] = 'actual_historical'
+                comprehensive_df.at[idx, 'Ann_Total_Return'] = stock_data['annualized_total_return']
+                comprehensive_df.at[idx, 'Return_Data_Source'] = 'actual_historical'
             else:
                 # Fallback: dividend yield + estimated growth
                 estimated_growth = sharpe_details['estimated_growth']*100 if sharpe_details['return_data_source'] == "actual_historical" else 8.0
-                comprehensive_df.loc[idx, 'Ann_Total_Return'] = row['dividend_yield'] + estimated_growth
-                comprehensive_df.loc[idx, 'Return_Data_Source'] = 'estimate'
+                comprehensive_df.at[idx, 'Ann_Total_Return'] = row['dividend_yield'] + estimated_growth
+                comprehensive_df.at[idx, 'Return_Data_Source'] = 'estimate'
             
             # 2. SHARPE COEFFICIENT per stock (using actual volatility if available)
             if stock_data.get('stock_volatility') is not None:
                 stock_volatility = stock_data['stock_volatility']
-                comprehensive_df.loc[idx, 'Volatility_Data_Source'] = 'actual_historical'
+                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'actual_historical'
             else:
                 stock_volatility = row['beta'] * market_volatility
-                comprehensive_df.loc[idx, 'Volatility_Data_Source'] = 'beta_adjusted'
+                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'beta_adjusted'
             
             # Expected return for Sharpe (use same as total return calculation)
             if stock_data.get('annualized_total_return') is not None:
@@ -1838,14 +1838,14 @@ def main():
             else:
                 expected_return = (row['dividend_yield']/100) + (sharpe_details['estimated_growth'] if sharpe_details['return_data_source'] == "actual_historical" else 0.08)
             
-            comprehensive_df.loc[idx, 'Stock_Sharpe'] = (expected_return - risk_free_rate) / stock_volatility if stock_volatility > 0 else 0
+            comprehensive_df.at[idx, 'Stock_Sharpe'] = (expected_return - risk_free_rate) / stock_volatility if stock_volatility > 0 else 0
             
             # 3. MEAN OPPORTUNITY MARGIN per stock (same as before)
             market_pe = 20
             if row['pe_ratio'] > 0:
-                comprehensive_df.loc[idx, 'Opp_Margin'] = ((market_pe - row['pe_ratio']) / market_pe) * 100
+                comprehensive_df.at[idx, 'Opp_Margin'] = ((market_pe - row['pe_ratio']) / market_pe) * 100
             else:
-                comprehensive_df.loc[idx, 'Opp_Margin'] = 0
+                comprehensive_df.at[idx, 'Opp_Margin'] = 0
         
         # Add color coding/icons for quick assessment
         comprehensive_df['Sharpe_Rating'] = comprehensive_df['Stock_Sharpe'].apply(
