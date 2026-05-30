@@ -1996,6 +1996,9 @@ def main():
         )
         
         # Yearly returns sparkline list (used by BarChartColumn)
+        # Must pre-create as object dtype so pandas accepts list values per cell
+        comprehensive_df['Yearly_Returns_List'] = None
+        comprehensive_df['Yearly_Returns_List'] = comprehensive_df['Yearly_Returns_List'].astype(object)
         for idx, row in comprehensive_df.iterrows():
             yr_ret = individual_stock_data.get(row['symbol'], {}).get('yearly_returns', {})
             comprehensive_df.at[idx, 'Yearly_Returns_List'] = (
