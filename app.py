@@ -1111,47 +1111,212 @@ def main():
     
     # MAIN ANALYSIS
     portfolio_holdings = st.session_state.holdings
-    
+
+    # Clear cached analysis when the portfolio changes so stale data is never shown
+    cached = st.session_state.get('_analysis')
+    if cached and cached.get('portfolio_holdings') != list(portfolio_holdings):
+        del st.session_state['_analysis']
+
     if portfolio_holdings and st.sidebar.button("🚀 Analyze Portfolio", type="primary"):
         
-        # Fetch data
+        # ── COMPUTATION PHASE (runs once on button click) ──────────────────
+
+        # 1. Fetch stock info
         portfolio_data = []
         progress_bar = st.progress(0)
-        
         for i, holding in enumerate(portfolio_holdings):
             symbol = holding['symbol']
             progress_bar.progress((i + 1) / len(portfolio_holdings))
-            
             stock_info = analyzer.fetch_stock_info(symbol)
-            
-            # Handle proportional allocation
-            if holding.get('allocation_method') in ['weight', 'equal']:
-                # Recalculate shares based on actual price and total portfolio value
-                # For now, use the estimated shares from input
-                stock_info['shares'] = holding['shares']
-            else:
-                stock_info['shares'] = holding['shares']
-            
+            stock_info['shares'] = holding['shares']
             portfolio_data.append(stock_info)
-        
         progress_bar.empty()
-        
+
         portfolio_df = pd.DataFrame(portfolio_data)
-        
-        # Calculate basic metrics first
         metrics = analyzer.calculate_portfolio_metrics(portfolio_df)
-        
-        # Calculate historical performance
-        years_str = analysis_period.rstrip('y')  # Remove 'y' suffix
+
+        # 2. Historical performance
+        years_str = analysis_period.rstrip('y')
         years = int(years_str) if years_str.isdigit() else 3
-        
         with st.spinner("Calculating historical performance..."):
             historical_performance = analyzer.simulate_historical_performance(
-                portfolio_holdings, 
-                years=years,
-                show_dividend_details=show_dividend_details
+                portfolio_holdings, years=years, show_dividend_details=show_dividend_details
             )
-        
+
+        # 3. Dividend calendar
+        dividend_history, daily_dividends, monthly_dividends = analyzer.generate_historical_dividend_calendar(portfolio_holdings)
+
+        # 4. Derived metrics
+        sharpe_details = analyzer.calculate_sharpe_details(metrics, portfolio_df, historical_performance, years)
+        div_details = analyzer.calculate_diversification_details(metrics)
+
+        actual_annual_return_for_synthesis = None
+        if not historical_performance.empty and len(historical_performance) > 1:
+            _tr = historical_performance['Total_Return'].iloc[-1]
+            actual_annual_return_for_synthesis = ((1 + _tr / 100) ** (1 / years) - 1) * 100
+
+        sharpe_ratio = sharpe_details['sharpe_ratio']
+
+        _valid_pe = portfolio_df[portfolio_df['pe_ratio'] > 0]
+        if len(_valid_pe) > 0:
+            _pw = (_valid_pe['shares'] * _valid_pe['current_price'])
+            _pw = _pw / _pw.sum()
+            opportunity_margin = ((20 - (_valid_pe['pe_ratio'] * _pw).sum()) / 20) * 100
+        else:
+            opportunity_margin = 0
+
+        annual_return_display = actual_annual_return_for_synthesis if actual_annual_return_for_synthesis is not None else metrics['portfolio_dividend_yield'] + 8
+        div_yield = metrics['portfolio_dividend_yield']
+        diversification_score = div_details['diversification_score']
+
+        # 5. Portfolio alerts
+        problematic_stocks = analyzer.identify_problematic_stocks(portfolio_df, metrics, historical_performance)
+
+        # 6. Individual stock data (incl. per-year returns for stability charts)
+        individual_stock_data = {}
+        if not historical_performance.empty and len(portfolio_holdings) > 0:
+            st.info("📊 Calculating individual stock historical performance...")
+            progress_bar = st.progress(0)
+            for i, holding in enumerate(portfolio_holdings):
+                symbol = holding['symbol']
+                progress_bar.progress((i + 1) / len(portfolio_holdings))
+                try:
+                    time.sleep(0.5)
+                    stock = yf.Ticker(symbol)
+                    _end = datetime.now()
+                    _start = _end - timedelta(days=years * 365)
+                    hist = stock.history(start=_start, end=_end, auto_adjust=True, back_adjust=True)
+                    if not hist.empty and len(hist) > 10:
+                        initial_price = hist['Close'].iloc[0]
+                        final_price = hist['Close'].iloc[-1]
+                        dividends = stock.dividends
+                        if len(dividends) > 0:
+                            _ddates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                            total_dividends_per_share = dividends[(_ddates >= _start) & (_ddates <= _end)].sum()
+                        else:
+                            total_dividends_per_share = 0
+                        total_return_pct = ((final_price + total_dividends_per_share) / initial_price - 1) * 100
+                        price_only_return_pct = (final_price / initial_price - 1) * 100
+                        annualized_total_return = ((1 + total_return_pct / 100) ** (1 / years) - 1) * 100
+                        annualized_price_return = ((1 + price_only_return_pct / 100) ** (1 / years) - 1) * 100
+                        _rets = hist['Close'].pct_change().dropna()
+                        stock_volatility = _rets.std() * np.sqrt(252) if len(_rets) > 5 else None
+                        stock_yearly_returns = {}
+                        hist_yr = hist.copy()
+                        hist_yr.index = pd.to_datetime(hist_yr.index).normalize()
+                        for yr in sorted(hist_yr.index.year.unique()):
+                            yr_data = hist_yr[hist_yr.index.year == yr]
+                            if len(yr_data) < 2:
+                                continue
+                            yr_start_p = yr_data['Close'].iloc[0]
+                            yr_end_p = yr_data['Close'].iloc[-1]
+                            yr_divs = 0.0
+                            if len(dividends) > 0:
+                                try:
+                                    _dn = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
+                                    yr_divs = float(dividends[_dn.year == yr].sum())
+                                except Exception:
+                                    yr_divs = 0.0
+                            if yr_start_p > 0:
+                                stock_yearly_returns[yr] = (yr_end_p + yr_divs - yr_start_p) / yr_start_p * 100
+                        individual_stock_data[symbol] = {
+                            'annualized_total_return': annualized_total_return,
+                            'annualized_price_return': annualized_price_return,
+                            'stock_volatility': stock_volatility,
+                            'yearly_returns': stock_yearly_returns,
+                            'data_source': 'actual_historical'
+                        }
+                except Exception:
+                    individual_stock_data[symbol] = {
+                        'annualized_total_return': None, 'annualized_price_return': None,
+                        'stock_volatility': None, 'yearly_returns': {}, 'data_source': 'estimate'
+                    }
+            progress_bar.empty()
+
+        # 7. Build comprehensive_df
+        comprehensive_df = portfolio_df.copy()
+        comprehensive_df['Value'] = comprehensive_df['shares'] * comprehensive_df['current_price']
+        comprehensive_df['Weight %'] = (comprehensive_df['Value'] / metrics['total_value']) * 100
+        _rfr = 0.04
+        _mktv = 0.16
+        for idx, row in comprehensive_df.iterrows():
+            _sd = individual_stock_data.get(row['symbol'], {})
+            if _sd.get('annualized_total_return') is not None:
+                comprehensive_df.at[idx, 'Ann_Total_Return'] = _sd['annualized_total_return']
+                comprehensive_df.at[idx, 'Return_Data_Source'] = 'actual_historical'
+            else:
+                _eg = sharpe_details['estimated_growth'] * 100 if sharpe_details['return_data_source'] == "actual_historical" else 8.0
+                comprehensive_df.at[idx, 'Ann_Total_Return'] = row['dividend_yield'] + _eg
+                comprehensive_df.at[idx, 'Return_Data_Source'] = 'estimate'
+            if _sd.get('stock_volatility') is not None:
+                _sv = _sd['stock_volatility']
+                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'actual_historical'
+            else:
+                _sv = row['beta'] * _mktv
+                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'beta_adjusted'
+            _er = _sd['annualized_total_return'] / 100 if _sd.get('annualized_total_return') is not None else (row['dividend_yield'] / 100) + (sharpe_details['estimated_growth'] if sharpe_details['return_data_source'] == "actual_historical" else 0.08)
+            comprehensive_df.at[idx, 'Stock_Sharpe'] = (_er - _rfr) / _sv if _sv > 0 else 0
+            comprehensive_df.at[idx, 'Opp_Margin'] = ((20 - row['pe_ratio']) / 20) * 100 if row['pe_ratio'] > 0 else 0
+
+        comprehensive_df['Sharpe_Rating'] = comprehensive_df['Stock_Sharpe'].apply(lambda x: "🟢" if x > 1.0 else "🟡" if x > 0.5 else "🔴")
+        comprehensive_df['Margin_Rating'] = comprehensive_df['Opp_Margin'].apply(lambda x: "🟢" if x > 10 else "🟡" if x > -10 else "🔴")
+        comprehensive_df['Return_Rating'] = comprehensive_df['Ann_Total_Return'].apply(lambda x: "🟢" if x > 12 else "🟡" if x > 8 else "🔴")
+        comprehensive_df['Dividend_Rating'] = comprehensive_df['dividend_yield'].apply(lambda x: "🟢" if x > 4 else "🟡" if x > 2 else "🔴")
+
+        comprehensive_df['Yearly_Returns_List'] = None
+        comprehensive_df['Yearly_Returns_List'] = comprehensive_df['Yearly_Returns_List'].astype(object)
+        for idx, row in comprehensive_df.iterrows():
+            _yr = individual_stock_data.get(row['symbol'], {}).get('yearly_returns', {})
+            comprehensive_df.at[idx, 'Yearly_Returns_List'] = [round(_yr[y], 1) for y in sorted(_yr.keys())] if _yr else []
+
+        display_comprehensive = comprehensive_df.copy()
+        display_comprehensive['Sharpe Coef'] = display_comprehensive.apply(lambda r: f"{r['Sharpe_Rating']} {r['Stock_Sharpe']:.2f} {'📊' if r.get('Volatility_Data_Source') == 'actual_historical' else '⚖️'}", axis=1)
+        display_comprehensive['Opp Margin'] = display_comprehensive.apply(lambda r: f"{r['Margin_Rating']} {r['Opp_Margin']:+.1f}%", axis=1)
+        display_comprehensive['Ann Total Return'] = display_comprehensive.apply(lambda r: f"{r['Return_Rating']} {r['Ann_Total_Return']:.1f}% {'📊' if r.get('Return_Data_Source') == 'actual_historical' else '📈'}", axis=1)
+        display_comprehensive['Dividend Yield'] = display_comprehensive.apply(lambda r: f"{r['Dividend_Rating']} {r['dividend_yield']:.1f}%", axis=1)
+        synthesis_display = display_comprehensive[['symbol', 'name', 'Weight %', 'Value', 'Sharpe Coef', 'Opp Margin', 'Ann Total Return', 'Dividend Yield', 'Yearly_Returns_List']].copy()
+
+        # 8. Cache everything — rendering block below uses this on every rerun
+        st.session_state['_analysis'] = dict(
+            portfolio_df=portfolio_df, metrics=metrics,
+            historical_performance=historical_performance, years=years,
+            sharpe_details=sharpe_details, div_details=div_details,
+            actual_annual_return_for_synthesis=actual_annual_return_for_synthesis,
+            sharpe_ratio=sharpe_ratio, opportunity_margin=opportunity_margin,
+            annual_return_display=annual_return_display, div_yield=div_yield,
+            diversification_score=diversification_score,
+            problematic_stocks=problematic_stocks,
+            comprehensive_df=comprehensive_df, display_comprehensive=display_comprehensive,
+            synthesis_display=synthesis_display, individual_stock_data=individual_stock_data,
+            dividend_history=dividend_history, daily_dividends=daily_dividends,
+            monthly_dividends=monthly_dividends,
+            portfolio_holdings=list(portfolio_holdings),
+        )
+
+    # ── RENDERING PHASE — runs on every Streamlit rerun from session_state ──
+    if '_analysis' in st.session_state:
+        _a = st.session_state['_analysis']
+        portfolio_df              = _a['portfolio_df']
+        metrics                   = _a['metrics']
+        historical_performance    = _a['historical_performance']
+        years                     = _a['years']
+        sharpe_details            = _a['sharpe_details']
+        div_details               = _a['div_details']
+        actual_annual_return_for_synthesis = _a['actual_annual_return_for_synthesis']
+        sharpe_ratio              = _a['sharpe_ratio']
+        opportunity_margin        = _a['opportunity_margin']
+        annual_return_display     = _a['annual_return_display']
+        div_yield                 = _a['div_yield']
+        diversification_score     = _a['diversification_score']
+        problematic_stocks        = _a['problematic_stocks']
+        comprehensive_df          = _a['comprehensive_df']
+        display_comprehensive     = _a['display_comprehensive']
+        synthesis_display         = _a['synthesis_display']
+        individual_stock_data     = _a['individual_stock_data']
+        dividend_history          = _a['dividend_history']
+        daily_dividends           = _a['daily_dividends']
+        monthly_dividends         = _a['monthly_dividends']
+
         # Portfolio Overview
         st.header("📊 Portfolio Overview")
         
@@ -1299,9 +1464,7 @@ def main():
         # Dividend Calendar - Historical Analysis
         st.header("📅 Historical Dividend Calendar (Last 12 Months)")
         st.info("💰 **Actual dividend payments received** - showing real dividend income history")
-        
-        dividend_history, daily_dividends, monthly_dividends = analyzer.generate_historical_dividend_calendar(portfolio_holdings)
-        
+
         if not dividend_history.empty:
             # Summary metrics
             total_dividends_received = dividend_history['Total_Dividend_Received'].sum()
@@ -1453,85 +1616,26 @@ def main():
         st.header("🎯 Portfolio Synthesis Metrics")
         st.info("📊 **Final synthesis using actual calculated values from analysis above**")
         
-        # Calculate detailed breakdowns for both metrics
-        sharpe_details = analyzer.calculate_sharpe_details(metrics, portfolio_df, historical_performance, years)
-        div_details = analyzer.calculate_diversification_details(metrics)
-        
-        # Get actual annualized return from historical performance if available
-        actual_annual_return_for_synthesis = None
-        if not historical_performance.empty and len(historical_performance) > 1:
-            total_return_for_synthesis = historical_performance['Total_Return'].iloc[-1]
-            actual_annual_return_for_synthesis = ((1 + total_return_for_synthesis/100) ** (1/years) - 1) * 100
-        
         col1, col2, col3, col4, col5 = st.columns(5)
-        
         with col1:
-            sharpe_ratio = sharpe_details['sharpe_ratio']
             sharpe_color = "🟢" if sharpe_ratio > 1.0 else "🟡" if sharpe_ratio > 0.5 else "🔴"
             return_icon = "📊" if sharpe_details['return_data_source'] == "actual_historical" else "📈"
             volatility_icon = "📊" if sharpe_details['volatility_data_source'] == "actual_historical" else "⚖️"
-            combined_icon = f"{return_icon}{volatility_icon}"
-            st.metric(
-                "Sharpe Coefficient", 
-                f"{sharpe_color} {sharpe_ratio:.2f} {combined_icon}",
-                help=f"Risk-adjusted return (>1.0 = good, >2.0 = excellent). Icons: {return_icon}=return data, {volatility_icon}=volatility data"
-            )
-        
+            st.metric("Sharpe Coefficient", f"{sharpe_color} {sharpe_ratio:.2f} {return_icon}{volatility_icon}", help="Risk-adjusted return (>1.0 = good, >2.0 = excellent)")
         with col2:
-            # Calculate opportunity margin
-            valid_pe_data = portfolio_df[portfolio_df['pe_ratio'] > 0]
-            if len(valid_pe_data) > 0:
-                portfolio_weights = valid_pe_data['shares'] * valid_pe_data['current_price']
-                portfolio_weights = portfolio_weights / portfolio_weights.sum()
-                weighted_pe = (valid_pe_data['pe_ratio'] * portfolio_weights).sum()
-                market_pe = 20
-                opportunity_margin = ((market_pe - weighted_pe) / market_pe) * 100
-            else:
-                opportunity_margin = 0
-            
             margin_color = "🟢" if opportunity_margin > 10 else "🟡" if opportunity_margin > -10 else "🔴"
-            st.metric(
-                "Mean Opp. Margin", 
-                f"{margin_color} {opportunity_margin:+.1f}%",
-                help="Valuation vs market (+% = undervalued)"
-            )
-        
+            st.metric("Mean Opp. Margin", f"{margin_color} {opportunity_margin:+.1f}%", help="Valuation vs market (+% = undervalued)")
         with col3:
-            # Use ACTUAL annualized return from curves or estimate
-            if actual_annual_return_for_synthesis is not None:
-                annual_return_display = actual_annual_return_for_synthesis
-                data_source_icon = "📊"
-                help_text = "Actual annual return from historical performance curves above"
-            else:
-                annual_return_display = metrics['portfolio_dividend_yield'] + 8  # Estimate
-                data_source_icon = "📈"
-                help_text = "Estimated (no historical data available)"
-            
+            data_source_icon = "📊" if actual_annual_return_for_synthesis is not None else "📈"
+            help_text = "Actual annual return from historical performance curves above" if actual_annual_return_for_synthesis is not None else "Estimated (no historical data available)"
             return_color = "🟢" if annual_return_display > 12 else "🟡" if annual_return_display > 8 else "🔴"
-            st.metric(
-                "Ann. Total Return (Div)", 
-                f"{return_color} {annual_return_display:.1f}%",
-                help=f"{data_source_icon} {help_text}"
-            )
-        
+            st.metric("Ann. Total Return (Div)", f"{return_color} {annual_return_display:.1f}%", help=f"{data_source_icon} {help_text}")
         with col4:
-            # Dividend Yield
-            div_yield = metrics['portfolio_dividend_yield']
             yield_color = "🟢" if div_yield > 4 else "🟡" if div_yield > 2 else "🔴"
-            st.metric(
-                "Dividend Yield", 
-                f"{yield_color} {div_yield:.1f}%",
-                help="Current annual dividend yield"
-            )
-        
+            st.metric("Dividend Yield", f"{yield_color} {div_yield:.1f}%", help="Current annual dividend yield")
         with col5:
-            diversification_score = div_details['diversification_score']
             div_color = "🟢" if diversification_score > 70 else "🟡" if diversification_score > 40 else "🔴"
-            st.metric(
-                "Sector Diversification", 
-                f"{div_color} {diversification_score:.0f}/100",
-                help="Sector balance: More sectors + balanced allocation + no concentration >25%"
-            )
+            st.metric("Sector Diversification", f"{div_color} {diversification_score:.0f}/100", help="Sector balance score")
         
         # DETAILED METRIC EXPLANATIONS WITH INFOGRAPHICS
         st.header("📋 Detailed Metric Explanations")
@@ -1762,9 +1866,7 @@ def main():
         # 🚨 PORTFOLIO OPTIMIZATION ALERTS
         st.header("🚨 Portfolio Optimization Alerts")
         st.info("🔍 **Automated analysis** - stocks that may need attention for portfolio optimization")
-        
-        problematic_stocks = analyzer.identify_problematic_stocks(portfolio_df, metrics, historical_performance)
-        
+
         if not problematic_stocks.empty:
             st.subheader("⚠️ Top 5 Stocks to Review")
             
@@ -1843,189 +1945,6 @@ def main():
         # 📋 COMPREHENSIVE HOLDINGS ANALYSIS
         st.header("📋 Comprehensive Holdings Analysis")
         st.info("🎯 **Individual stock synthesis metrics** - same criteria as Portfolio Synthesis applied to each stock")
-        
-        # Calculate individual stock historical performance
-        individual_stock_data = {}
-        
-        if not historical_performance.empty and len(portfolio_holdings) > 0:
-            st.info("📊 Calculating individual stock historical performance...")
-            progress_bar = st.progress(0)
-            
-            for i, holding in enumerate(portfolio_holdings):
-                symbol = holding['symbol']
-                progress_bar.progress((i + 1) / len(portfolio_holdings))
-                
-                try:
-                    time.sleep(0.5)  # Rate limiting
-                    stock = yf.Ticker(symbol)
-                    
-                    # Get historical data for the same period
-                    end_date = datetime.now()
-                    start_date = end_date - timedelta(days=years*365)
-                    hist = stock.history(start=start_date, end=end_date, auto_adjust=True, back_adjust=True)
-                    
-                    if not hist.empty and len(hist) > 10:
-                        # Calculate total return (price + dividends)
-                        initial_price = hist['Close'].iloc[0]
-                        final_price = hist['Close'].iloc[-1]
-                        
-                        # Get dividends over period
-                        dividends = stock.dividends
-                        if len(dividends) > 0:
-                            dividend_dates = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
-                            period_mask = (dividend_dates >= start_date) & (dividend_dates <= end_date)
-                            total_dividends_per_share = dividends[period_mask].sum()
-                        else:
-                            total_dividends_per_share = 0
-                        
-                        # Calculate total return percentage
-                        total_return_pct = ((final_price + total_dividends_per_share) / initial_price - 1) * 100
-                        price_only_return_pct = (final_price / initial_price - 1) * 100
-                        
-                        # Annualize the returns
-                        annualized_total_return = ((1 + total_return_pct/100) ** (1/years) - 1) * 100
-                        annualized_price_return = ((1 + price_only_return_pct/100) ** (1/years) - 1) * 100
-                        
-                        # Calculate individual stock volatility
-                        returns = hist['Close'].pct_change().dropna()
-                        if len(returns) > 5:
-                            stock_volatility = returns.std() * np.sqrt(252)  # Annualize
-                        else:
-                            stock_volatility = None
-
-                        # Per-year returns for the stability chart
-                        stock_yearly_returns = {}
-                        hist_yr = hist.copy()
-                        hist_yr.index = pd.to_datetime(hist_yr.index).normalize()
-                        for yr in sorted(hist_yr.index.year.unique()):
-                            yr_data = hist_yr[hist_yr.index.year == yr]
-                            if len(yr_data) < 2:
-                                continue
-                            yr_start = yr_data['Close'].iloc[0]
-                            yr_end = yr_data['Close'].iloc[-1]
-                            yr_divs = 0.0
-                            if len(dividends) > 0:
-                                try:
-                                    div_norm = dividends.index.tz_localize(None) if dividends.index.tz is not None else dividends.index
-                                    yr_divs = float(dividends[div_norm.year == yr].sum())
-                                except Exception:
-                                    yr_divs = 0.0
-                            if yr_start > 0:
-                                stock_yearly_returns[yr] = (yr_end + yr_divs - yr_start) / yr_start * 100
-
-                        individual_stock_data[symbol] = {
-                            'annualized_total_return': annualized_total_return,
-                            'annualized_price_return': annualized_price_return,
-                            'stock_volatility': stock_volatility,
-                            'yearly_returns': stock_yearly_returns,
-                            'data_source': 'actual_historical'
-                        }
-                    
-                except Exception as e:
-                    # Fallback to estimates
-                    individual_stock_data[symbol] = {
-                        'annualized_total_return': None,
-                        'annualized_price_return': None,
-                        'stock_volatility': None,
-                        'yearly_returns': {},
-                        'data_source': 'estimate'
-                    }
-            
-            progress_bar.empty()
-        
-        # Create comprehensive holdings dataframe with synthesis metrics
-        comprehensive_df = portfolio_df.copy()
-        
-        # Basic portfolio metrics
-        comprehensive_df['Value'] = comprehensive_df['shares'] * comprehensive_df['current_price']
-        comprehensive_df['Weight %'] = (comprehensive_df['Value'] / metrics['total_value']) * 100
-        
-        # Apply individual stock data or fallbacks
-        risk_free_rate = 0.04
-        market_volatility = 0.16
-        
-        for idx, row in comprehensive_df.iterrows():
-            symbol = row['symbol']
-            stock_data = individual_stock_data.get(symbol, {})
-            
-            # 1. ANNUALIZED TOTAL RETURN per stock (actual or estimated)
-            if stock_data.get('annualized_total_return') is not None:
-                comprehensive_df.at[idx, 'Ann_Total_Return'] = stock_data['annualized_total_return']
-                comprehensive_df.at[idx, 'Return_Data_Source'] = 'actual_historical'
-            else:
-                # Fallback: dividend yield + estimated growth
-                estimated_growth = sharpe_details['estimated_growth']*100 if sharpe_details['return_data_source'] == "actual_historical" else 8.0
-                comprehensive_df.at[idx, 'Ann_Total_Return'] = row['dividend_yield'] + estimated_growth
-                comprehensive_df.at[idx, 'Return_Data_Source'] = 'estimate'
-            
-            # 2. SHARPE COEFFICIENT per stock (using actual volatility if available)
-            if stock_data.get('stock_volatility') is not None:
-                stock_volatility = stock_data['stock_volatility']
-                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'actual_historical'
-            else:
-                stock_volatility = row['beta'] * market_volatility
-                comprehensive_df.at[idx, 'Volatility_Data_Source'] = 'beta_adjusted'
-            
-            # Expected return for Sharpe (use same as total return calculation)
-            if stock_data.get('annualized_total_return') is not None:
-                expected_return = stock_data['annualized_total_return'] / 100
-            else:
-                expected_return = (row['dividend_yield']/100) + (sharpe_details['estimated_growth'] if sharpe_details['return_data_source'] == "actual_historical" else 0.08)
-            
-            comprehensive_df.at[idx, 'Stock_Sharpe'] = (expected_return - risk_free_rate) / stock_volatility if stock_volatility > 0 else 0
-            
-            # 3. MEAN OPPORTUNITY MARGIN per stock (same as before)
-            market_pe = 20
-            if row['pe_ratio'] > 0:
-                comprehensive_df.at[idx, 'Opp_Margin'] = ((market_pe - row['pe_ratio']) / market_pe) * 100
-            else:
-                comprehensive_df.at[idx, 'Opp_Margin'] = 0
-        
-        # Add color coding/icons for quick assessment
-        comprehensive_df['Sharpe_Rating'] = comprehensive_df['Stock_Sharpe'].apply(
-            lambda x: "🟢" if x > 1.0 else "🟡" if x > 0.5 else "🔴"
-        )
-        comprehensive_df['Margin_Rating'] = comprehensive_df['Opp_Margin'].apply(
-            lambda x: "🟢" if x > 10 else "🟡" if x > -10 else "🔴"
-        )
-        comprehensive_df['Return_Rating'] = comprehensive_df['Ann_Total_Return'].apply(
-            lambda x: "🟢" if x > 12 else "🟡" if x > 8 else "🔴"
-        )
-        comprehensive_df['Dividend_Rating'] = comprehensive_df['dividend_yield'].apply(
-            lambda x: "🟢" if x > 4 else "🟡" if x > 2 else "🔴"
-        )
-        
-        # Yearly returns sparkline list (used by BarChartColumn)
-        # Must pre-create as object dtype so pandas accepts list values per cell
-        comprehensive_df['Yearly_Returns_List'] = None
-        comprehensive_df['Yearly_Returns_List'] = comprehensive_df['Yearly_Returns_List'].astype(object)
-        for idx, row in comprehensive_df.iterrows():
-            yr_ret = individual_stock_data.get(row['symbol'], {}).get('yearly_returns', {})
-            comprehensive_df.at[idx, 'Yearly_Returns_List'] = (
-                [round(yr_ret[y], 1) for y in sorted(yr_ret.keys())] if yr_ret else []
-            )
-
-        # Format for display with data source indicators
-        display_comprehensive = comprehensive_df.copy()
-        display_comprehensive['Sharpe Coef'] = display_comprehensive.apply(
-            lambda row: f"{row['Sharpe_Rating']} {row['Stock_Sharpe']:.2f} {'📊' if row.get('Volatility_Data_Source') == 'actual_historical' else '⚖️'}", axis=1
-        )
-        display_comprehensive['Opp Margin'] = display_comprehensive.apply(
-            lambda row: f"{row['Margin_Rating']} {row['Opp_Margin']:+.1f}%", axis=1
-        )
-        display_comprehensive['Ann Total Return'] = display_comprehensive.apply(
-            lambda row: f"{row['Return_Rating']} {row['Ann_Total_Return']:.1f}% {'📊' if row.get('Return_Data_Source') == 'actual_historical' else '📈'}", axis=1
-        )
-        display_comprehensive['Dividend Yield'] = display_comprehensive.apply(
-            lambda row: f"{row['Dividend_Rating']} {row['dividend_yield']:.1f}%", axis=1
-        )
-        
-        # Display the synthesis metrics table
-        synthesis_display = display_comprehensive[[
-            'symbol', 'name', 'Weight %', 'Value',
-            'Sharpe Coef', 'Opp Margin', 'Ann Total Return', 'Dividend Yield',
-            'Yearly_Returns_List'
-        ]].copy()
         
         st.dataframe(
             synthesis_display,
