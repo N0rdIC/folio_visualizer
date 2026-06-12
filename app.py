@@ -96,42 +96,49 @@ class PortfolioAnalyzer:
     def calculate_portfolio_metrics(self, portfolio_data: pd.DataFrame) -> Dict:
         """Calculate portfolio metrics"""
         metrics = {}
-        
+
         # Current portfolio value
         total_value = (portfolio_data['shares'] * portfolio_data['current_price']).sum()
         metrics['total_value'] = total_value
-        
+
         if total_value == 0:
+            # Set default values when portfolio is empty
+            metrics['annual_dividends'] = 0
+            metrics['portfolio_dividend_yield'] = 0
+            metrics['weighted_pe'] = 0
+            metrics['portfolio_beta'] = 1.0
+            metrics['sector_allocation'] = pd.DataFrame()
+            metrics['top_holdings'] = pd.DataFrame()
             return metrics
-        
+
         # Portfolio weights
         portfolio_data['weight'] = (portfolio_data['shares'] * portfolio_data['current_price']) / total_value
-        
+
         # Annual dividend income
         annual_dividends = (portfolio_data['shares'] * portfolio_data['dividend_rate']).sum()
         metrics['annual_dividends'] = annual_dividends
-        
+
         # Portfolio dividend yield
         metrics['portfolio_dividend_yield'] = (annual_dividends / total_value) * 100
-        
+
         # Weighted P/E ratio
         portfolio_data['pe_weighted'] = portfolio_data['weight'] * portfolio_data['pe_ratio']
         metrics['weighted_pe'] = portfolio_data['pe_weighted'].sum()
-        
+
         # Portfolio beta
         portfolio_data['beta_weighted'] = portfolio_data['weight'] * portfolio_data['beta']
         metrics['portfolio_beta'] = portfolio_data['beta_weighted'].sum()
-        
+
         # Sector diversification
         sector_allocation = portfolio_data.groupby('sector').agg({
             'weight': 'sum'
         })
         metrics['sector_allocation'] = sector_allocation
-        
+
         # Top holdings
         portfolio_data_sorted = portfolio_data.sort_values('weight', ascending=False)
         metrics['top_holdings'] = portfolio_data_sorted.head(10)
-        
+
         return metrics
 
     def calculate_sharpe_details(self, metrics: Dict, portfolio_data: pd.DataFrame, historical_performance: pd.DataFrame = None, years: int = 3) -> Dict:
