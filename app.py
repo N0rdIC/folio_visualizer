@@ -107,7 +107,7 @@ class PortfolioAnalyzer:
             metrics['portfolio_dividend_yield'] = 0
             metrics['weighted_pe'] = 0
             metrics['portfolio_beta'] = 1.0
-            metrics['sector_allocation'] = pd.DataFrame()
+            metrics['sector_allocation'] = pd.DataFrame({'sector': [], 'weight': []})
             metrics['top_holdings'] = pd.DataFrame()
             return metrics
 
@@ -1346,26 +1346,32 @@ def main():
         with col1:
             # Sector allocation
             sector_data = metrics['sector_allocation'].reset_index()
-            fig_sector = px.pie(
-                sector_data, 
-                values='weight', 
-                names='sector',
-                title="Sector Allocation"
-            )
-            st.plotly_chart(fig_sector, use_container_width=True)
+            if len(sector_data) > 0:
+                fig_sector = px.pie(
+                    sector_data,
+                    values='weight',
+                    names='sector',
+                    title="Sector Allocation"
+                )
+                st.plotly_chart(fig_sector, use_container_width=True)
+            else:
+                st.info("No sector data available")
         
         with col2:
             # Top holdings
             top_holdings = metrics['top_holdings'].head(8)
-            fig_holdings = px.bar(
-                top_holdings,
-                x='weight',
-                y='symbol',
-                orientation='h',
-                title="Top Holdings by Weight"
-            )
-            fig_holdings.update_layout(yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig_holdings, use_container_width=True)
+            if len(top_holdings) > 0:
+                fig_holdings = px.bar(
+                    top_holdings,
+                    x='weight',
+                    y='symbol',
+                    orientation='h',
+                    title="Top Holdings by Weight"
+                )
+                fig_holdings.update_layout(yaxis={'categoryorder': 'total ascending'})
+                st.plotly_chart(fig_holdings, use_container_width=True)
+            else:
+                st.info("No holdings data available")
         
         # Historical Performance Analysis
         st.header("📈 Historical Performance Analysis")
